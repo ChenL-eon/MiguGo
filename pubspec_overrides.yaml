@@ -1,0 +1,7 @@
+# 本地补丁：flutter_inappwebview_android 1.1.3 的 android/build.gradle 仍在使用
+# AGP 9 已移除的 getDefaultProguardFile('proguard-android.txt')，安卓端构建会直接失败。
+# patches/ 下是原样复制的 1.1.3，只把那两行换成 proguard-android-optimize.txt，Dart 代码未改。
+# 等官方发布修复版后删掉本文件即可。仅影响 Android 端，Windows 端不变。
+dependency_overrides:
+  flutter_inappwebview_android:
+    path: patches/flutter_inappwebview_android
