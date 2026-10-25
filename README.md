@@ -148,6 +148,8 @@ flutter run -d <device-id>
 flutter build apk --release
 ```
 
+Windows 安装包（可选）由 `windows/installer/MiguGo.iss` 生成，需要 Inno Setup 6：`ISCC.exe /DAppVersion=1.0.0 windows\installer\MiguGo.iss`。
+
 ### 环境要求
 
 - Windows 构建需要 Visual Studio 2022 的「使用 C++ 的桌面开发」工作负载、C++ ATL 组件（`flutter_secure_storage` 需要）以及 Windows 10/11 SDK。
@@ -244,6 +246,7 @@ flutter test --concurrency=1
 - 单次导入最多扫描 500 首、最多保存 20 个歌单；匹配并发 4，遇到咪咕限流会整单停下并提示稍后再试。
 - 应用没有做单实例限制：请勿同时运行多个窗口或进程，多进程同时写本机凭据与偏好没有经过验证。
 - Android 发布包当前使用 debug 签名，仅适合个人本地安装；如需长期使用请自行配置 release 签名。
+- Windows 程序当前未做代码签名，SmartScreen 可能提示；请核对发布页的 SHA-256 后选择「更多信息 → 仍要运行」。
 - Windows 全局快捷键若被其他程序占用会注册失败，应用内空格与 SMTC 媒体键仍可使用。
 - Windows 曾出现引擎无障碍桥随机闪退（`0xc0000005`，flutter/flutter#175041），现在由 `windows/runner/flutter_window.cpp` 拦下 `WM_GETOBJECT` 规避；代价是屏幕阅读器无法读取本应用窗口，等引擎修复后删掉拦截即可恢复。开发环境已完成 Windows Release 构建与连续 10 次启动验证，Android release APK 已构建并安装到真机启动（2026-10-22）。
 

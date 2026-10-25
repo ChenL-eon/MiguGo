@@ -71,11 +71,31 @@ jobs:
           $zip = "MiguGo-${{ needs.prepare.outputs.version }}-windows-x64.zip"
           tar.exe -a -c -f $zip --exclude=*.pdb -C "build/windows/x64/runner/Release" .
           Get-Item $zip | Format-List Name,Length
-      - name: Upload Windows artifact
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found" }
+          New-Item -ItemType Directory -Force build\installer | Out-Null
+          & $iscc "/DAppVersion=${{ needs.prepare.outputs.version }}" "windows\installer\MiguGo.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC.exe failed with exit code $LASTEXITCODE" }
+          $setup = "build\installer\MiguGo-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe"
+          if (-not (Test-Path $setup)) { throw "installer not found: $setup" }
+          Copy-Item $setup .
+          Get-Item $setup | Format-List Name,Length
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: MiguGo-*-windows-x64.zip
+          path: |
+            MiguGo-*-windows-x64.zip
+            MiguGo-*-windows-x64-setup.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -137,6 +157,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           test -f "dist/MiguGo-${VERSION}-windows-x64.zip"
+          test -f "dist/MiguGo-${VERSION}-windows-x64-setup.exe"
           test -f "dist/MiguGo-${VERSION}-android.apk"
           ls -lh dist
       - name: Prepare release notes
@@ -149,13 +170,17 @@ jobs:
 
           | 平台 | 文件 |
           | --- | --- |
-          | Windows 10/11 x64 | MiguGo-${VERSION}-windows-x64.zip |
+          | Windows 10/11 x64 | MiguGo-${VERSION}-windows-x64-setup.exe（安装版） |
+          | Windows 10/11 x64 | MiguGo-${VERSION}-windows-x64.zip（免安装版） |
           | Android 7.0+ | MiguGo-${VERSION}-android.apk |
 
           ## 运行要求
 
-          - Windows：Windows 10/11 x64，需要 WebView2 Runtime；解压整个目录后运行 MiguGo.exe。
+          - Windows：安装版双击 setup.exe 安装；免安装版解压整个目录后运行 MiguGo.exe。两者都需要 WebView2 Runtime。
+          - Windows 安装版按当前用户安装，不需要管理员权限；卸载不会删除 %APPDATA%\cn.migulele\MiguGo 中的账号与设置。
           - Android：Android 7.0（API 24）及以上。
+
+          > Windows 安装包与程序暂未做代码签名，SmartScreen 可能提示「Windows 已保护你的电脑」。请先核对下方 SHA-256，再选择「更多信息 → 仍要运行」。
 
           ## 已知限制
 
