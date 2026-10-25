@@ -148,6 +148,8 @@ flutter run -d <device-id>
 flutter build apk --release
 ```
 
+发布流程会把 Android 包按 ABI 拆分为 `arm64-v8a` 与 `armeabi-v7a` 两个 APK：`flutter build apk --release --target-platform android-arm,android-arm64 --split-per-abi`。
+
 Windows 安装包（可选）由 `windows/installer/MiguGo.iss` 生成，需要 Inno Setup 6：`ISCC.exe /DAppVersion=1.0.0 windows\installer\MiguGo.iss`。
 
 ### 环境要求

@@ -125,14 +125,17 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
       - name: Build Android release
-        run: flutter build apk --release
-      - name: Rename APK
-        run: mv build/app/outputs/flutter-apk/app-release.apk "MiguGo-${{ needs.prepare.outputs.version }}-android.apk"
+        run: flutter build apk --release --target-platform android-arm,android-arm64 --split-per-abi
+      - name: Rename APKs
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "MiguGo-${version}-android-arm64-v8a.apk"
+          mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "MiguGo-${version}-android-armeabi-v7a.apk"
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: MiguGo-*-android.apk
+          path: MiguGo-*-android-*.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -158,7 +161,8 @@ jobs:
         run: |
           test -f "dist/MiguGo-${VERSION}-windows-x64.zip"
           test -f "dist/MiguGo-${VERSION}-windows-x64-setup.exe"
-          test -f "dist/MiguGo-${VERSION}-android.apk"
+          test -f "dist/MiguGo-${VERSION}-android-arm64-v8a.apk"
+          test -f "dist/MiguGo-${VERSION}-android-armeabi-v7a.apk"
           ls -lh dist
       - name: Prepare release notes
         env:
@@ -172,13 +176,14 @@ jobs:
           | --- | --- |
           | Windows 10/11 x64 | MiguGo-${VERSION}-windows-x64-setup.exe（安装版） |
           | Windows 10/11 x64 | MiguGo-${VERSION}-windows-x64.zip（免安装版） |
-          | Android 7.0+ | MiguGo-${VERSION}-android.apk |
+          | Android 7.0+ 64 位 | MiguGo-${VERSION}-android-arm64-v8a.apk（绝大多数手机） |
+          | Android 7.0+ 32 位 | MiguGo-${VERSION}-android-armeabi-v7a.apk（老旧 32 位设备） |
 
           ## 运行要求
 
           - Windows：安装版双击 setup.exe 安装；免安装版解压整个目录后运行 MiguGo.exe。两者都需要 WebView2 Runtime。
           - Windows 安装版按当前用户安装，不需要管理员权限；卸载不会删除 %APPDATA%\cn.migulele\MiguGo 中的账号与设置。
-          - Android：Android 7.0（API 24）及以上。
+          - Android：Android 7.0（API 24）及以上；请按手机架构选择 APK：64 位手机用 arm64-v8a，老旧 32 位设备用 armeabi-v7a；arm64 包装到 32 位机会无法安装。
 
           > Windows 安装包与程序暂未做代码签名，SmartScreen 可能提示「Windows 已保护你的电脑」。请先核对下方 SHA-256，再选择「更多信息 → 仍要运行」。
 
