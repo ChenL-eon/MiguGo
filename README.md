@@ -43,13 +43,13 @@ MiguGo 是一个使用 Flutter 编写的个人练习项目：在 Windows 与 And
 
 | 首页 · 每日推荐与精选歌单                                     | 播放页 · 封面取色背景与同步歌词                                     | 歌单 · 账号歌单与外部导入                                          |
 | :-------------------------------------------------------------: | :-------------------------------------------------------------------: | :-----------------------------------------------------------------: |
-| <img src="docs/screenshots/desktop-home.png" alt="桌面端首页" width="380" /> | <img src="docs/screenshots/desktop-player.png" alt="桌面端播放页" width="380" /> | <img src="docs/screenshots/desktop-playlist.png" alt="桌面端歌单页" width="380" /> |
+| <img src="docs/screenshots/desktop-home.png" alt="桌面端首页" width="260" /> | <img src="docs/screenshots/desktop-player.png" alt="桌面端播放页" width="260" /> | <img src="docs/screenshots/desktop-playlist.png" alt="桌面端歌单页" width="260" /> |
 
 移动端：
 
 | 首页 · 推荐与搜索                                  | 播放页 · 大字歌词与进度                                | 我的 · 账号、收藏与歌单                                |
 | :--------------------------------------------------: | :------------------------------------------------------: | :------------------------------------------------------: |
-| <img src="docs/screenshots/mobile-home.png" alt="移动端首页" width="215" /> | <img src="docs/screenshots/mobile-player.png" alt="移动端播放页" width="215" /> | <img src="docs/screenshots/mobile-account.png" alt="移动端我的页" width="215" /> |
+| <img src="docs/screenshots/mobile-home.png" alt="移动端首页" width="260" /> | <img src="docs/screenshots/mobile-player.png" alt="移动端播放页" width="260" /> | <img src="docs/screenshots/mobile-account.png" alt="移动端我的页" width="260" /> |
 
 > 截图取自真机与 Windows 实机运行，账号昵称、头像与自建歌单名已做像素化处理。
 
