@@ -118,10 +118,12 @@ jobs:
           flutter-version: '3.47.7'
           channel: stable
           cache: true
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
       - name: Install Android SDK components
-        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+        # 运行镜像自带 Android SDK 与 cmdline-tools；setup-android@v3 会先去装早
+        # 已被 Google 下架的 legacy `tools` 包，必然失败，所以直接用镜像里的 sdkmanager。
+        run: |
+          SDKMANAGER=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
       - name: Install dependencies
         run: flutter pub get
       - name: Build Android release
