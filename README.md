@@ -37,6 +37,24 @@ MiguGo 是一个使用 Flutter 编写的个人练习项目：在 Windows 与 And
 
 ---
 
+## 📸 界面
+
+桌面端：
+
+| 首页 · 每日推荐与精选歌单                                     | 播放页 · 封面取色背景与同步歌词                                     | 歌单 · 账号歌单与外部导入                                          |
+| :-------------------------------------------------------------: | :-------------------------------------------------------------------: | :-----------------------------------------------------------------: |
+| <img src="docs/screenshots/desktop-home.png" alt="桌面端首页" width="380" /> | <img src="docs/screenshots/desktop-player.png" alt="桌面端播放页" width="380" /> | <img src="docs/screenshots/desktop-playlist.png" alt="桌面端歌单页" width="380" /> |
+
+移动端：
+
+| 首页 · 推荐与搜索                                  | 播放页 · 大字歌词与进度                                | 我的 · 账号、收藏与歌单                                |
+| :--------------------------------------------------: | :------------------------------------------------------: | :------------------------------------------------------: |
+| <img src="docs/screenshots/mobile-home.png" alt="移动端首页" width="215" /> | <img src="docs/screenshots/mobile-player.png" alt="移动端播放页" width="215" /> | <img src="docs/screenshots/mobile-account.png" alt="移动端我的页" width="215" /> |
+
+> 截图取自真机与 Windows 实机运行，账号昵称、头像与自建歌单名已做像素化处理。
+
+---
+
 ## ✨ 核心功能
 
 ### 🎧 首页与搜索
@@ -197,7 +215,7 @@ assets/
     └── windows_ico_source/      # Windows 专用：母图已烘焙粉色圆角方形底板，用于打包 app_icon.ico
 tool/
 └── make_icons.ps1               # 从母图生成 Windows / Android 图标资源
-docs/                            # 接口与实现、隐私政策全文
+docs/                            # 接口与实现、隐私政策全文，以及 README 用的界面截图
 ```
 
 图标由 `tool/make_icons.ps1` 从 `assets/icon_png/master/MiguGo_1024.png` 生成并拷贝到各平台资源目录。界面位图不参与生成：圆角由 `BrandBadge` 的 `ClipRRect` 负责。Android 前景保持透明、不烘焙圆角，遮罩交给系统；Windows 没有系统圆角，圆角与粉色底板直接做进 PNG 母图，ICO 含 16–256 共 7 帧。
