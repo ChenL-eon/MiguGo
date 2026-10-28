@@ -13,7 +13,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter&logoColor=white" alt="Flutter" />
   <img src="https://img.shields.io/badge/Dart-3.13%2B-0175C2?logo=dart&logoColor=white" alt="Dart" />
-  <img src="https://img.shields.io/badge/Version-1.0.0-4CAF50" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-1.1.0-4CAF50" alt="Version" />
   <img src="https://img.shields.io/badge/Use-Learning%20Only-orange" alt="Learning only" />
 </p>
 
@@ -59,7 +59,7 @@ MiguGo 是一个使用 Flutter 编写的个人练习项目：在 Windows 与 And
 ### ▶️ 播放与歌词
 
 - **在线播放** — 免费曲目与已登录账号的 VIP 曲目都走原生取链，`just_audio` 在线流式播放，不下载、不落盘。
-- **音质** — 标准 / 高品质 / 无损三档，按账号权益逐级回退；切换后从下一首生效。
+- **音质** — 标准 / 高品质 / 无损 / 至臻四档，按账号权益逐级回退；至臻 24bit 需曲目提供且账号有对应权益，切换后从下一首生效。
 - **播放页** — 封面、歌曲信息、逐行同步歌词、进度拖动与音量调节。
 - **播放控制** — 上一首 / 下一首、单曲循环 / 列表循环 / 随机播放、倍速、睡眠定时。
 - **官方播放器兜底** — 原生取链被咪咕拒绝时，可在同一面板切到咪咕官方网页播放器。
@@ -73,19 +73,21 @@ MiguGo 是一个使用 Flutter 编写的个人练习项目：在 Windows 与 And
 - **个人中心** — 头像、昵称、打码手机号、VIP 标识、凭据项数、登录时间与最近校验时间；弹窗底部可展开隐私政策全文。
 - **退出登录 / 切换账号** — 清凭据、票据与账号快照，停止播放并清空队列。
 - **权益跟随官方** — 是否可播放完全由咪咕按账号权益判定，应用只携带用户自己的凭据发起请求。
+- **会话两小时** — 咪咕给每份 `pacmtoken` 的有效期约两小时：网页登录那一次的 `Set-Cookie` 里直接写着 `Max-Age=7200`，真机记录里闲置过两小时一律回 `850005 登录超时`；应用可见时每 45–75 分钟调一次官方 `checkPacMtoken` 校验，成功顺带写回轮换的新值，退出应用后不再续，回来按失效提示重新登录。
 
 ### 🎨 外观与设置
 
 - **主题** — 默认跟随系统明暗、强调色玫粉；可切换浅色 / 深色 / 跟随系统，以及玫粉 / 晴蓝 / 青绿 / 琥珀 / 紫罗兰五种强调色。
 - **播放设置** — 默认播放模式、播放音质、音量记忆、歌词自动滚动、睡眠定时。
 - **其他** — 环境光晕、搜索历史、快捷键开关与恢复默认；所有改动即时生效并保存在本机。
-- **关于页** — 用途与版权声明、更新开关、合规边界与实现说明。
+- **关于页** — 用途与版权声明、版本检查（立即检查在页内给出结论，可另开启动时自动检查）、合规边界与实现说明。
 
 ### 🖥️ 平台集成
 
 - **Windows 播放** — SMTC 系统媒体卡片，屏幕媒体键交由系统媒体会话处理。
 - **Windows 快捷键** — `Ctrl + Alt + 空格` 播放 / 暂停，`Ctrl + Alt + ←/→` 上一首 / 下一首；可选裸空格全局快捷键默认关闭。
 - **Windows 界面** — 原生标题栏跟随主题切换深浅色；「设置 → 桌面歌词」可开独立歌词浮层。
+- **Windows 常驻托盘** — 咪咕给每份登录凭据只有约两小时命，「设置 → 账户 → 后台保持登录」开启后，点窗口上的关闭只是隐藏窗口，进程留着每 45–75 分钟带本机凭据做一次同一件官方登录校验，成功时顺带续期；双击托盘图标回到主界面，托盘菜单「退出」才结束进程。默认关闭，Android 不提供这一项。
 - **Android 播放** — 通知栏与锁屏控制、后台播放、音频焦点；来电或其他应用占用音频时自动暂停。
 - **交互差异** — 桌面歌曲行双击起播、单击只给悬停反馈；触屏单击即播并进入播放页。
 
@@ -103,7 +105,7 @@ MiguGo 是一个使用 Flutter 编写的个人练习项目：在 Windows 与 And
 | **安全存储** | `flutter_secure_storage`（Android Keystore / Windows DPAPI） |
 | **偏好与文件** | `shared_preferences`、`path_provider` |
 | **WebView** | `flutter_inappwebview`（官方登录窗口、VIP 官方播放器） |
-| **桌面窗口与快捷键** | `window_manager`、`hotkey_manager` |
+| **桌面窗口、托盘与快捷键** | `window_manager`、`tray_manager`、`hotkey_manager` |
 | **图标与矢量** | `flutter_svg` |
 | **代码规范** | `flutter_lints` |
 
@@ -150,7 +152,7 @@ flutter build apk --release
 
 发布流程会把 Android 包按 ABI 拆分为 `arm64-v8a` 与 `armeabi-v7a` 两个 APK：`flutter build apk --release --target-platform android-arm,android-arm64 --split-per-abi`。
 
-Windows 安装包（可选）由 `windows/installer/MiguGo.iss` 生成，需要 Inno Setup 6：`ISCC.exe /DAppVersion=1.0.0 windows\installer\MiguGo.iss`。
+Windows 安装包（可选）由 `windows/installer/MiguGo.iss` 生成，需要 Inno Setup 6：`ISCC.exe /DAppVersion=1.1.0 windows\installer\MiguGo.iss`。
 
 ### 环境要求
 
@@ -181,13 +183,14 @@ lib/
 │   ├── auth/                    # 原生通行证登录（RSA、登录接口）、网页登录 Cookie 清洗、登录完成判定与登录会话同步
 │   ├── audio/                   # 系统媒体会话桥接
 │   ├── external/                # 外部歌单抓取与曲目匹配（独立客户端，不带 Cookie）
-│   ├── platform/                # Windows 全局快捷键、标题栏主题与旧版数据迁移
+│   ├── platform/                # Windows 全局快捷键、标题栏主题、关闭主窗口后常驻托盘与旧版数据迁移
 │   └── web/                     # WebView 环境与内嵌播放器地址
 ├── pages/                       # 首页推送、搜索、歌单导入、咪咕歌单、导入歌单、播放、设置、官方登录窗口、关于
 └── widgets/                     # 自定义卡片、列表项、迷你播放器、账号弹窗与内嵌的原生登录面板、登录提示组件
 test/                            # 歌词、模型、首页推送、歌单导入、Cookie 网页登录、主题色映射、设置持久化与合规文案测试
 assets/
 ├── svg/                         # 界面矢量：透明底白色圆环，无底板、无圆角；粉色底板与圆角由 BrandBadge 绘制
+├── tray/                        # Windows 托盘图标（由 app_icon.ico 复制而来，tray_manager 按 flutter_assets 路径加载）
 └── icon_png/
     ├── master/                  # 1024 PNG 原稿母图
     ├── android/                 # 自适应图标：透明圆环前景 + 纯渐变背景；另有 legacy 各密度与 Play 512
@@ -208,7 +211,7 @@ flutter analyze
 flutter test --concurrency=1
 ```
 
-当前共 473 个测试，覆盖登录协议与 RSA、会话续期与失效判定、VIP 取链与音质回退、歌单导入匹配、设置持久化、桌面歌词、Android 组件与合规文案等。
+当前共 616 个测试，覆盖登录协议与 RSA、失效判定与自动退出（含哪条回绝才算取证、校验接口专属的失效码、取证不足与凑够两次的分界、换票返回码与回包形态是否如实写进调试记录、只由调试入口发起的换票）、凭据状态源一致性（认证凭证只落在登录快照、罐子里的凭证副本被接回、到期与删除语义都不改写凭据）、跨登录代际的写入隔离与 `checkPacMtoken` 单飞、Cookie 头与裸 `pacmtoken` 头是否带出同一份、调试记录只留指纹不留原文、前台保活的排期与「允许后台」的分界，以及 VIP 取链与音质回退、歌词取址回退、歌单导入匹配、设置持久化与导航分组、常驻托盘开关只在 Windows 出现、桌面歌词、Android 组件与合规文案等。
 
 ---
 
@@ -231,10 +234,11 @@ flutter test --concurrency=1
 
 完整正文在应用登录弹窗内展示，内容常量位于 `lib/core/constants/app_constants.dart`，同一份内容同步在 [docs/隐私政策.md](docs/隐私政策.md)。
 
-- **没有自建服务器** — 没有统计、广告、崩溃上报或自动更新组件。
+- **没有自建服务器** — 没有统计、广告与崩溃上报组件；检查更新只匿名读一次 GitHub 上本仓库的公开发布记录，不下载文件、不自动安装。
 - **凭据只在本机** — 登录凭据写入系统安全存储（Android Keystore / Windows DPAPI），仅发送给咪咕域名。
 - **敏感信息不落盘** — 手机号、验证码与密码加密后直接提交给咪咕，本机不落盘、不写日志。
 - **最少权限** — 设备标识只发给咪咕；Android 清单只声明 `INTERNET`。
+- **后台常驻要用户自己开** — Windows 的「关闭主窗口后常驻托盘」默认关闭，开启后进程留在后台只做同一件登录校验，不播放音频、不读文件、不上报；关掉这个开关，关闭按钮就按常规退出。
 
 ---
 
@@ -246,7 +250,7 @@ flutter test --concurrency=1
 - VIP 曲目只能按咪咕账号权益播放：账号无对应权益时服务端不会下发地址，应用不做本地提权。
 - 外部歌单依赖各平台公开接口或公开页面：酷狗网页版只公开前 30 首；按标题与歌手匹配，重名、翻唱或信息不全时可能漏配或配错。
 - 单次导入最多扫描 500 首、最多保存 20 个歌单；匹配并发 4，遇到咪咕限流会整单停下并提示稍后再试。
-- 应用没有做单实例限制：请勿同时运行多个窗口或进程，多进程同时写本机凭据与偏好没有经过验证。
+- 应用没有做单实例限制：请勿同时运行多个窗口或进程，多进程同时写本机凭据与偏好没有经过验证。开启「关闭主窗口后常驻托盘」后尤其要注意——窗口看不见不等于进程已退出，再从桌面图标点开就是第二个实例；要真退出请用托盘菜单里的「退出」。
 - Android 发布包当前使用 debug 签名，仅适合个人本地安装；如需长期使用请自行配置 release 签名。
 - Windows 程序当前未做代码签名，SmartScreen 可能提示；请核对发布页的 SHA-256 后选择「更多信息 → 仍要运行」。
 - Windows 全局快捷键若被其他程序占用会注册失败，应用内空格与 SMTC 媒体键仍可使用。

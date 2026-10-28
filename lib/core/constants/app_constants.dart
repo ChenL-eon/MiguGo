@@ -7,11 +7,16 @@ class AppConstants {
   const AppConstants._();
 
   static const String appName = 'MiguGo';
-  static const String appVersion = '1.0.0';
+  static const String appVersion = '1.1.0';
 
-  /// 关于页的代码仓库与更新入口，地址确定前先留占位。
-  static const String githubRepoUrl = '#';
-  static const String updatePageUrl = '#';
+  /// 关于页的代码仓库与更新入口；更新按钮落在发行版列表，而不是仓库首页。
+  static const String githubRepoUrl = 'https://github.com/ChenL-eon/MiguGo';
+  static const String updatePageUrl =
+      'https://github.com/ChenL-eon/MiguGo/releases';
+
+  /// 版本检查只读这一条公开发布接口；仓库是 public，匿名访问，不带任何凭据。
+  static const String latestReleaseApiUrl =
+      'https://api.github.com/repos/ChenL-eon/MiguGo/releases/latest';
 
   /// 咪咕接口要求携带的固定来源页。
   static const String miguReferer = 'https://music.migu.cn';
@@ -45,14 +50,26 @@ class AppConstants {
   static const String passportCaptchaCheckUrl =
       'https://passport.migu.cn/captcha/graph/check';
 
-  /// 用登录票据换音乐站会话（登录与静默续期共用；响应里的
-  /// `Set-Cookie: pacmtoken` 即取链凭据）。
+  /// 用登录票据换音乐站会话（登录时调用；响应里的
+  /// `Set-Cookie: pacmtoken` 即取链凭据）。这张票一次一用，换完即废，
+  /// 再拿它调一次只会回 `199999`，所以只有调试入口会重复调用。
   static const String passportTokenValidateUrl =
       'https://c.musicapp.migu.cn/user/h5/token-validate/v3.0';
+
+  /// 官方网页每次打开都会调用的会话校验/轮换接口。
+  ///
+  /// 只带 `pacmtoken` 请求头，成功码 `000000`；轮换后的新值可能放在
+  /// 响应头 `pacmtoken` 里，官方 SDK 会把它写回本地。
+  static const String pacmCheckUrl =
+      'https://c.musicapp.migu.cn/mgateway/api/checkPacMtoken';
 
   // 当前可用的公开 PC 接口（v3 接口现已 301 重定向至 v5）。
   static const String songSearchUrl =
       'https://app.u.nf.migu.cn/pc/resource/song/item/search/v1.0';
+
+  /// 按 contentId 读取歌曲资源，歌词地址缺失时作为搜索补全前的备用来源。
+  static const String resourceInfoUrl =
+      'https://app.u.nf.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do';
   static const String playlistSearchUrl =
       'https://app.u.nf.migu.cn/pc/v1.0/content/search_all.do';
   static const String playlistInfoUrl =
@@ -140,13 +157,25 @@ class AppConstants {
           '登录换来的会话凭据写入系统安全存储：Android 由 Keystore 派生密钥加密，'
           'Windows 是以当前 Windows 账户加密的密文，放在该用户的应用数据目录里，'
           '换个账户读出来解不开。原生登录保存取链用的 pacmtoken，'
-          '以及通行证签发的那张登录票据（token）：票据不随普通请求发送，'
-          '只在账号接口回绝本机凭据时用来再换一次新 pacmtoken，换不到就按登录失效处理。'
+          '以及通行证签发的那张登录票据（token）：票据不随普通请求发送，只在登录那一次发给咪咕。'
+          '咪咕在这一次就把票用掉了，它换不来第二份会话（2026-10-26 用真实账号实测确认），'
+          '所以应用不会拿它做自动续期；本机留着它，只是让调试版能当场再试一次，退出登录时一并删掉。'
           '改用官方页面登录时，保存的是那个页面写下的咪咕音乐登录 Cookie，'
-          '其中可能包含 uid、手机号标识 msisdn 与网页会话 id；'
-          '这条路径没有登录票据，不会主动续期。'
+          '其中可能包含 uid、手机号标识 msisdn 与网页会话 id；这条路径没有登录票据。'
           '之后咪咕接口通过 Set-Cookie 轮换的会话值也只更新进这一份加密存储，'
           '用途是取播放地址、读取本账号资料与账号里的歌单。',
+    ),
+    (
+      title: '关闭主窗口后常驻托盘（Windows 可选）',
+      body:
+          '咪咕给每份登录凭据的有效期只有约两小时，要靠应用按时问一次服务端才续得上；'
+          '应用一退，就没人再问了。这是 Windows 端设置「账户」分组里默认关闭的一项：'
+          '开启后点窗口上的关闭只是把主窗口藏起来，进程留在后台，'
+          '每 45–75 分钟带本机那份登录凭据向 c.musicapp.migu.cn 查一次登录状态——'
+          '和你开着窗口时做的同一件校验完全一样，不多带别的信息、不去新的地址。'
+          '后台期间不播放音频、不读取你的文件、没有任何统计上报。'
+          '双击托盘图标回到主界面；托盘菜单里的「退出」立即停止这一保活并结束进程；'
+          '把这个开关关掉，关闭窗口就按常规退出，托盘随之消失。',
     ),
     (
       title: '图形验证码',
@@ -183,11 +212,13 @@ class AppConstants {
       body:
           '除咪咕自有域名外，本应用不会主动连别的地址：passport.migu.cn 负责登录，'
           'app.c.nf.migu.cn、app.u.nf.migu.cn、app.pd.nf.migu.cn 负责曲库、取链、歌词与封面，'
-          'c.musicapp.migu.cn 负责登录换票与会话续期，'
+          'c.musicapp.migu.cn 负责登录换票与登录状态校验，'
           'music.migu.cn 与 d.musicapp.migu.cn 是官方页面与图片。'
-          '两个例外不由本应用决定：播放地址是咪咕返回的跳转，会落到它自己的音频 CDN，域名不固定；'
+          '咪咕之外的去处只有下面几处，都不带凭据：播放地址是咪咕返回的跳转，会落到它自己的音频 CDN，域名不固定；'
           '导入外部歌单时，封面按来源平台给出的图片地址加载。'
-          '只有在主动导入歌单时才访问网易云、QQ音乐、酷狗的公开歌单页，且只读曲目名与歌手。',
+          '只有在主动导入歌单时才访问网易云、QQ音乐、酷狗的公开歌单页，且只读曲目名与歌手。'
+          '还有一处和咪咕无关：检查更新时向 api.github.com 要本仓库最新一条公开发布记录，'
+          '请求里不带账号、不带凭据，只用来比一个版本号。',
     ),
     (
       title: 'WebView 里产生的数据',
@@ -204,7 +235,10 @@ class AppConstants {
     (
       title: '日志与第三方组件',
       body:
-          '没有统计、广告、崩溃上报或自动更新组件，依赖里只有播放、界面与网络库。'
+          '没有统计、广告或崩溃上报组件；检查更新只匿名读一次 GitHub 上本仓库的公开发布记录，'
+          '比一个版本号，不下载文件、不自动安装，启动时的那一次可以在设置里关掉。'
+          '依赖里除播放、界面与网络库外，桌面端还带窗口与托盘组件，'
+          '它们只在你的屏幕上摆本应用自己的窗口和一枚托盘图标，不读取别的内容。'
           '不写日志文件，调试输出只进系统调试日志，不外发。'
           '界面文案、错误提示和调试输出都不包含 Cookie 值、密码或验证码，'
           '涉及凭据的提示只说名称不说内容。',
@@ -214,7 +248,8 @@ class AppConstants {
       body:
           'Android 清单只声明网络访问一项，不申请存储、通讯录、定位、麦克风或相机权限；'
           '安装包中出现的前台服务、通知与网络状态类权限来自后台播放和系统媒体控制插件。'
-          'Windows 端没有权限申请，桌面歌词只是本机屏幕上的一个悬浮窗口，不采集任何内容。',
+          'Windows 端没有权限申请，桌面歌词只是本机屏幕上的一个悬浮窗口，不采集任何内容；'
+          '开启常驻托盘后多出的也只是任务栏通知区域里的一枚本应用图标。',
     ),
     (
       title: '如何清除本机数据',
@@ -224,9 +259,10 @@ class AppConstants {
           '设置、搜索历史与导入的歌单都不受这一步影响，搜索历史与设置也能在设置页单独清空。'
           '咪咕没有登出接口，退出只发生在你这台设备上，不会通知服务端。'
           '当要求登录的账号接口（用户资料、账号歌单）回绝本机凭据——HTTP 401 或返回'
-          '“请先登录”——时，原生登录的账号会先用留存的登录票据静默换一次新会话，'
-          '换到了就继续用，不算一次回绝；换不到时，应用第一次只把状态标成'
+          '“请先登录”——时，应用第一次只把状态标成'
           '「登录可能已失效」并继续保留凭据；'
+          '本机不会在这一步替你悄悄换一份新凭据：登录票据已经在登录时被咪咕用掉，换不来新会话，'
+          '试一次只会把判定拖慢。'
           '隔过 30 分钟后账号接口再次回绝，才认定这份凭据确实作废，按同样的方式'
           '自动退出一次，同时在状态说明里写出最近一次被拒的接口地址、HTTP 状态码'
           '与业务编码，这条记录不含 Cookie、手机号或任何凭据内容。'

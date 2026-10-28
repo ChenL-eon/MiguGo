@@ -17,9 +17,27 @@ class MiguLoginException implements Exception {
     this.captchaRequired = false,
     this.officialOnly = false,
     this.networkInterrupted = false,
+    this.transient = false,
+    this.httpStatus,
+    this.officialCode = '',
+    this.bodyHint = '',
   });
 
   final String message;
+
+  /// 换票请求的 HTTP 状态，只给调试记录读，不进界面文案。
+  final int? httpStatus;
+
+  /// 咪咕回包里的业务码（如 `199999`）；只有码，不含它的提示文案。
+  ///
+  /// 换票接口的文案可能夹带请求内容本身，所以一路只取码、不取原文。
+  final String officialCode;
+
+  /// 回包读不出业务码时的形态（`非 JSON` / `空回包` / `JSON 里没有码`）。
+  ///
+  /// 真机曾连续三次续期只读得出 `HTTP 200`、码是空的，事后查明是键名只认
+  /// `status`；留这一笔是为了那种什么都读不出的回包至少还能分得开。
+  final String bodyHint;
 
   /// 咪咕要求先过图形验证码：界面应显示验证码图片与输入框，由用户本人识别。
   final bool captchaRequired;
@@ -32,6 +50,13 @@ class MiguLoginException implements Exception {
   /// 上层要把它和“咪咕明确回绝”分开：没问到结果就不能当成凭据作废的证据，
   /// 否则弱网里凑够两次取证会把用户永久登出。
   final bool networkInterrupted;
+
+  /// 咪咕答了，但答案暂时不能用来判定票据作废。
+  ///
+  /// `token-validate` 对失效票据也可能回 HTTP 200 + 业务码 `199999 系统繁忙`；
+  /// 5xx、429、403 与缺少 `pacmtoken` 的 2xx 同样分不清是票据问题还是服务抖动。
+  /// 这类失败只能把状态降级，不能替用户确认“凭据已作废”。
+  final bool transient;
 
   @override
   String toString() => 'MiguLoginException: $message';
@@ -68,8 +93,9 @@ class MiguLoginSession {
 
   final String? userId;
 
-  /// 通行证签发的登录票据，只留在本机安全存储里，用于日后静默换新会话，
-  /// 不随任何普通请求发送。
+  /// 通行证签发的登录票据，只留在本机安全存储里，不随任何普通请求发送。
+  /// 它在换出本次会话的那一次请求里就用掉了，换不来第二个会话，
+  /// 本机留着只给调试入口复测（`AccountProvider.debugRenewNow`）。
   final String? token;
 }
 
@@ -361,11 +387,23 @@ class MiguPassportApi {
     }
 
     final status = response.statusCode ?? 0;
+    // 两种字段名都可能用（status / code），只认一个会把码读成空；正文偶尔不被
+    // dio 解码成 Map（内容类型不对），那时自己也解一次，否则形态会说成“非 JSON”。
+    final decoded = _decodeBody(response.data);
+    final body = _asMap(decoded) ?? const <dynamic, dynamic>{};
+    final officialCode = _bodyCode(body);
+    final bodyHint = _bodyHint(decoded, officialCode);
     if (status < 200 || status >= 300) {
       throw MiguLoginException(
         renewal
-            ? '咪咕拒绝了会话续期请求（HTTP $status）。'
+            ? '咪咕暂时没有接受会话续期请求（HTTP $status）。'
             : '$method登录已提交，但咪咕拒绝了会话请求（HTTP $status）。',
+        // 只有 HTTP 401 是明确的“这张票据不被接受”；5xx、429、403 都可能
+        // 只是服务抖动或风控临时拦截，不能拿来确认凭据作废。
+        transient: renewal && status != 401,
+        httpStatus: status,
+        officialCode: officialCode,
+        bodyHint: bodyHint,
       );
     }
 
@@ -373,11 +411,16 @@ class MiguPassportApi {
     if (pacmtoken.isEmpty) {
       // 不回显服务端原文：这个接口的提示文案可能夹带请求内容本身。
       throw MiguLoginException(
-        renewal ? '咪咕没有接受这张登录票据。' : '咪咕没有下发音乐站登录凭据，请重试或改用官方页面登录。',
+        renewal ? '咪咕暂时没有接受这张登录票据。' : '咪咕没有下发音乐站登录凭据，请重试或改用官方页面登录。',
+        // 实测失效票据会回 HTTP 200 + 199999「系统繁忙」，与真正的服务抖动
+        // 无法区分；续期时只能按暂时失败处理，不能直接判死本机凭据。
+        transient: renewal,
+        httpStatus: status,
+        officialCode: officialCode,
+        bodyHint: bodyHint,
       );
     }
 
-    final body = _asMap(response.data) ?? const <dynamic, dynamic>{};
     final data = _asMap(body['data']);
     final msisdn = data?['msisdn']?.toString().trim() ?? '';
     final cookies = <String, String>{'pacmtoken': pacmtoken};
@@ -472,6 +515,36 @@ class MiguPassportApi {
   }
 
   Map<dynamic, dynamic>? _asMap(dynamic value) => value is Map ? value : null;
+
+  /// 回包里的业务码：`status` 与 `code` 都试，取到哪个算哪个。
+  String _bodyCode(Map<dynamic, dynamic> body) {
+    for (final key in const ['status', 'code']) {
+      final value = body[key]?.toString().trim() ?? '';
+      if (value.isNotEmpty) return value;
+    }
+    return '';
+  }
+
+  /// 只有读不出业务码时才记回包形态。
+  ///
+  /// 真机续期连续回 `HTTP 200` 却没有码，光这两样分不出「票据换不动」与
+  /// 「中间有个东西把请求挡下了」，形态才是剩下的那条线索。
+  String _bodyHint(dynamic data, String code) {
+    if (code.isNotEmpty) return '';
+    if (data is Map) return 'JSON 里没有码';
+    if (data is String) return data.trim().isEmpty ? '空回包' : '非 JSON';
+    return '没有回包体';
+  }
+
+  /// dio 因为内容类型没帮忙解码时自己解一次；解不动就原样交回。
+  dynamic _decodeBody(dynamic data) {
+    if (data is! String || data.trim().isEmpty) return data;
+    try {
+      return jsonDecode(data);
+    } catch (_) {
+      return data;
+    }
+  }
 
   String? _cookieValue(Response<dynamic> response, String name) {
     for (final header in response.headers.map['set-cookie'] ?? const <String>[]) {

@@ -34,6 +34,44 @@ void main() {
       expect(set.header, 'uid=deep');
     });
 
+    test('同名 pacmtoken 跨域时导出音乐域凭据并保留 UI 统计', () {
+      final set = WebLoginCookieSet.fromCookies([
+        cookie('pacmtoken', 'music-value', domain: '.migu.cn'),
+        cookie('pacmtoken', 'passport-value', domain: 'passport.migu.cn'),
+      ]);
+
+      expect(set.hasWebSessionFor('music.migu.cn'), isTrue);
+      expect(set.header, 'pacmtoken=music-value');
+      expect(set.length, 1);
+      expect(set.cookieNames, ['pacmtoken']);
+      expect(set.cookies.single.value, 'passport-value');
+    });
+
+    test('更具体域或路径的空值不覆盖有效凭据', () {
+      final set = WebLoginCookieSet.fromCookies([
+        cookie('pacmtoken', '', domain: 'music.migu.cn'),
+        cookie('pacmtoken', 'valid'),
+        cookie('mg_auth_sid', '', path: '/listen'),
+        cookie('mg_auth_sid', 'session'),
+      ]);
+
+      expect(set.hasWebSessionFor('music.migu.cn'), isTrue);
+      expect(set.header, 'mg_auth_sid=session; pacmtoken=valid');
+      expect(set.length, 2);
+    });
+
+    test('只有空值凭据时不导出且保留名称统计', () {
+      final set = WebLoginCookieSet.fromCookies([
+        cookie('pacmtoken', ''),
+        cookie('mg_auth_sid', '   '),
+        cookie('cookieId', 'device'),
+      ]);
+
+      expect(set.header, isNull);
+      expect(set.length, 3);
+      expect(set.cookieNames, ['cookieId', 'mg_auth_sid', 'pacmtoken']);
+    });
+
     test('请求头按名称稳定排序且不暴露重复名称', () {
       final set = WebLoginCookieSet.fromCookies([
         cookie('mg_auth_uid', '1'),
@@ -88,13 +126,16 @@ void main() {
       expect(set.hasWebSessionFor('music.migu.cn'), isFalse);
     });
 
-    test('只对通行证域生效的会话 Cookie 不算登录完成', () {
+    test('只对通行证域生效的会话 Cookie 不算登录完成且不导出', () {
       final set = WebLoginCookieSet.fromCookies([
         cookie('mg_auth_sid', 'sid-value', domain: 'passport.migu.cn'),
+        cookie('pacmtoken', 'passport-value', domain: 'passport.migu.cn'),
       ]);
 
       expect(set.hasWebSessionFor('music.migu.cn'), isFalse);
       expect(set.hasWebSessionFor('passport.migu.cn'), isTrue);
+      expect(set.header, isNull);
+      expect(set.length, 2);
     });
 
     test('同名 Cookie 同时存在于两个域时按音乐域判定', () {

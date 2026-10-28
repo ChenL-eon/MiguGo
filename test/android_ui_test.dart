@@ -737,9 +737,10 @@ void main() {
     await tester.tap(find.text('音质'));
     await tester.pumpAndSettle();
     expect(find.text('播放音质'), findsOneWidget);
-    await tester.tap(find.text('无损音质'));
+    expect(find.text('至臻音质'), findsOneWidget);
+    await tester.tap(find.text('至臻音质'));
     await tester.pumpAndSettle();
-    expect(find.text('无损'), findsOneWidget);
+    expect(find.text('至臻'), findsOneWidget);
 
     await tester.tap(find.text('定时'));
     await tester.pumpAndSettle();

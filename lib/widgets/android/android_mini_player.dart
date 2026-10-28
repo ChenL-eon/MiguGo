@@ -276,7 +276,7 @@ class _PlaybackOptionsSheet extends StatelessWidget {
             title: '播放音质',
             subtitle:
                 '优先请求所选音质，账号没有该档权益时自动回退；'
-                '实际发放由咪咕决定，下一首开始生效。',
+                '至臻 24bit 需曲目提供且账号有对应权益，下一首开始生效。',
             selected: settings.audioQuality,
             options: [
               for (final quality in AudioQuality.values)

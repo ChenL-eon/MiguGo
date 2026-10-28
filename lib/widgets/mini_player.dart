@@ -13,7 +13,7 @@ import 'player_queue_dialog.dart';
 import 'volume_slider.dart';
 
 /// 底部迷你播放条：左侧歌曲信息，中间上一首/播放/下一首，
-/// 右侧播放顺序、音量、播放列表、倍速与桌面歌词。
+/// 右侧播放顺序、音量浮层、播放列表、倍速与桌面歌词。
 class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key, required this.onOpen});
 
@@ -161,8 +161,8 @@ class _RightControls extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         _ModeButton(player: player),
+        VolumePillButton(player: player),
         if (wide) ...[
-          _VolumeControl(player: player),
           _MiniIconButton(
             icon: Icons.playlist_play_rounded,
             tooltip: '播放列表',
@@ -178,47 +178,6 @@ class _RightControls extends StatelessWidget {
           ),
           const _MoreControls(),
         ],
-      ],
-    );
-  }
-}
-
-class _VolumeControl extends StatelessWidget {
-  const _VolumeControl({required this.player});
-
-  final PlayerProvider player;
-
-  void _toggleMute() {
-    unawaited(player.setVolume(player.volume > 0 ? 0 : 0.8));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final percent = (player.volume.clamp(0.0, 1.0) * 100).round();
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        IconButton(
-          onPressed: _toggleMute,
-          tooltip: player.volume > 0 ? '静音' : '取消静音',
-          visualDensity: VisualDensity.compact,
-          color: context.palette.textSecondary,
-          iconSize: 20,
-          icon: Icon(
-            player.volume <= 0
-                ? Icons.volume_off_rounded
-                : percent < 60
-                ? Icons.volume_down_rounded
-                : Icons.volume_up_rounded,
-          ),
-        ),
-        SizedBox(
-          width: 92,
-          child: VolumeSlider(
-            value: player.volume,
-            onChanged: (value) => unawaited(player.setVolume(value)),
-          ),
-        ),
       ],
     );
   }
@@ -293,8 +252,6 @@ class _MoreControls extends StatelessWidget {
 
   Future<void> _handle(BuildContext context, String value) async {
     switch (value) {
-      case 'volume':
-        await showVolumeDialog(context);
       case 'speed':
         await showSpeedDialog(context);
       case 'lyrics':
@@ -309,16 +266,6 @@ class _MoreControls extends StatelessWidget {
       padding: EdgeInsets.zero,
       onSelected: (value) => unawaited(_handle(context, value)),
       itemBuilder: (context) => [
-        const PopupMenuItem(
-          value: 'volume',
-          child: Row(
-            children: [
-              Icon(Icons.volume_up_rounded, size: 18),
-              SizedBox(width: 10),
-              Text('音量', style: TextStyle(fontSize: 13)),
-            ],
-          ),
-        ),
         const PopupMenuItem(
           value: 'speed',
           child: Row(

@@ -13,6 +13,12 @@ class AppWebViewEnvironment {
   static const String _loginProfile = 'webview2';
   static const String _playerProfile = 'webview2_player';
 
+  /// 环境建立的等待上限。超时的只是本次调用，后台那次创建继续跑。
+  static const Duration _createTimeout = Duration(seconds: 45);
+
+  /// 清空 Cookie 的等待上限，避免登录页被同一个插件通道拖住。
+  static const Duration _cookieClearTimeout = Duration(seconds: 10);
+
   static final Map<String, WebViewEnvironment> _environments = {};
   static final Map<String, Future<WebViewEnvironment?>?> _pending = {};
 
@@ -42,7 +48,9 @@ class AppWebViewEnvironment {
     try {
       if (Platform.isWindows) {
         if (login == null) return;
-        await CookieManager.instance(webViewEnvironment: login).deleteAllCookies();
+        await CookieManager.instance(webViewEnvironment: login)
+            .deleteAllCookies()
+            .timeout(_cookieClearTimeout);
         return;
       }
       final manager = CookieManager.instance();
@@ -73,8 +81,11 @@ class AppWebViewEnvironment {
     if (!Platform.isWindows) return Future<WebViewEnvironment?>.value();
     final created = _environments[profile];
     if (created != null) return Future<WebViewEnvironment?>.value(created);
-    return _pending[profile] ??= _create(profile)
+    final pending = _pending[profile] ??= _create(profile)
         .whenComplete(() => _pending.remove(profile));
+    // create() 可能永远不返回，挂死的 future 会把登录页永久卡在「正在准备登录页面」。
+    // 超时只让本次调用拿到 null 去提示用户，创建留在后台：真建成了会进 _environments。
+    return pending.timeout(_createTimeout, onTimeout: () => null);
   }
 
   static Future<WebViewEnvironment?> _create(String profile) async {

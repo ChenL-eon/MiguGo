@@ -455,7 +455,75 @@ void main() {
         ),
       );
     });
+
+    test('200 不发凭据时记下业务码，字段名只认 status 会读成空', () async {
+      // 真机续期就是这一档：HTTP 200、不下发 Set-Cookie。
+      final api = MiguPassportApi(
+        dio: dioWith(
+          PassportStubAdapter(
+            validateCookie: '',
+            validateBody: '{"code":"199999","message":"系统繁忙"}',
+          ),
+        ),
+      );
+
+      final error = await _renewalError(api);
+
+      expect(error.httpStatus, 200);
+      expect(error.officialCode, '199999');
+      expect(error.bodyHint, '');
+      expect(error.transient, isTrue);
+    });
+
+    test('读不出业务码时记下回包形态，服务端原文一律不进记录', () async {
+      final html = await _renewalError(
+        MiguPassportApi(dio: dioWith(_PlainBodyStub('<html>风控拦截</html>'))),
+      );
+      expect(html.httpStatus, 200);
+      expect(html.officialCode, '');
+      expect(html.bodyHint, '非 JSON');
+      expect(html.message, isNot(contains('风控拦截')));
+
+      final empty = await _renewalError(
+        MiguPassportApi(dio: dioWith(_PlainBodyStub('   '))),
+      );
+      expect(empty.bodyHint, '空回包');
+    });
   });
+}
+
+Future<MiguLoginException> _renewalError(MiguPassportApi api) async {
+  try {
+    await api.renewSession('STnidStubToken');
+  } on MiguLoginException catch (error) {
+    return error;
+  }
+  throw StateError('续期没有按预期失败');
+}
+
+/// 回一份不是 JSON 的正文：内容类型不对时 dio 不解码，正好用来测形态识别。
+class _PlainBodyStub implements HttpClientAdapter {
+  _PlainBodyStub(this.body);
+
+  final String body;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<List<int>>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      body,
+      200,
+      headers: {
+        'content-type': ['text/plain; charset=utf-8'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
 }
 
 class _BrokenKeyStub implements HttpClientAdapter {

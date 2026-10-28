@@ -151,4 +151,4 @@ ResponseBody _json(String text, {int status = 200}) => ResponseBody.fromString(
   },
 );
 
-Dio dioWith(PassportStubAdapter adapter) => Dio()..httpClientAdapter = adapter;
+Dio dioWith(HttpClientAdapter adapter) => Dio()..httpClientAdapter = adapter;

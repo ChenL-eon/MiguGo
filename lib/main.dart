@@ -17,12 +17,17 @@ import 'providers/playlist_provider.dart';
 import 'providers/player_provider.dart';
 import 'providers/search_provider.dart';
 import 'providers/settings_provider.dart';
+import 'providers/update_provider.dart';
 import 'services/api/migu_cookie_store.dart';
 import 'services/api/migu_music_api.dart';
+import 'services/app_update_service.dart';
 import 'services/auth/session_keep_alive.dart';
+import 'services/auth/session_probe.dart';
+import 'services/auth/session_probe_diagnostics.dart';
 import 'services/auth/session_reject_ledger.dart';
 import 'services/auth/web_session_sync.dart';
 import 'services/external/external_playlist_service.dart';
+import 'services/platform/desktop_tray.dart';
 import 'services/platform/global_hotkeys.dart';
 import 'services/platform/legacy_data_migration.dart';
 
@@ -36,12 +41,16 @@ Future<void> main() async {
   final settings = SettingsProvider();
   await settings.load();
 
+  final updates = UpdateProvider(AppUpdateService());
+  await updates.load();
+
   late final SessionKeepAlive keepAlive;
   // 启动期就可能自动退登（refreshProfile 在播放器创建前发出），
   // 这里保持可空，避免闭包读到尚未赋值的 late final。
   PlayerProvider? player;
   late final AccountProvider account;
   account = AccountProvider(
+    diagnostics: SessionProbeDiagnostics.instance,
     onSessionEstablished: () => keepAlive.restart(),
     onSessionLost: () {
       keepAlive.stop();
@@ -57,6 +66,7 @@ Future<void> main() async {
   await account.initialize();
 
   final api = MiguMusicApi(
+    diagnostics: SessionProbeDiagnostics.instance,
     onAuthVerified: account.markVerified,
     onAuthRejected: account.markRejected,
     onSessionRevoked: account.markSessionRevoked,
@@ -64,20 +74,24 @@ Future<void> main() async {
   );
   account.attachApi(api);
 
-  // 保活只在前台跑：探到失效时账号层先用留存票据试一次续期，续不到才需要手动重登。
+  // 保活默认只在前台跑：探到失效就交给账号层做两步判定，判死就要用户手动重登。
+  // 下面挂了常驻托盘时允许后台继续，其余不变。
   keepAlive = SessionKeepAlive(
-    probe: api.checkSessionAlive,
+    probe: () => api.checkSessionAlive(trigger: 'keep-alive'),
     onAlive: account.markVerified,
     onRevoked: account.markSessionRevoked,
     sessionEpoch: () => account.credentialEpoch,
   )..attach();
-  if (account.hasLogin) keepAlive.restart();
-
   if (account.hasLogin) {
-    unawaited(account.refreshProfile());
-    unawaited(account.refreshLibrary());
+    keepAlive.restart();
+    // 先让官方校验接口过一遍：成功就顺带轮换 pacmtoken 并清零旧证据，
+    // 失败再照常拉资料，由拦截器按真正的拒绝取证。
+    unawaited(_warmUpSession(account, api));
   }
-  final importedPlaylists = ImportedPlaylistProvider(ExternalPlaylistService(), api);
+  final importedPlaylists = ImportedPlaylistProvider(
+    ExternalPlaylistService(),
+    api,
+  );
   await importedPlaylists.load();
 
   final createdPlayer = PlayerProvider(api, settings: settings);
@@ -89,14 +103,28 @@ Future<void> main() async {
 
   await _configureDesktopWindow(settings);
 
+  // 咪咕给每个 pacmtoken 只有签发后两小时命，应用一退就没人再去问服务端。
+  // 开了常驻托盘就把关闭变成隐藏，让同一件保活探测在窗口看不见的时候继续做。
+  final tray = DesktopTrayService(
+    onKeepAliveInBackground: (enabled) => keepAlive.allowsBackground = enabled,
+    onWindowHidden: () => unawaited(createdPlayer.pause()),
+  );
+  await tray.setEnabled(settings.backgroundKeepAliveEnabled);
+  settings.addListener(
+    () => unawaited(tray.setEnabled(settings.backgroundKeepAliveEnabled)),
+  );
+
   runApp(
     MultiProvider(
       providers: [
         Provider<MiguMusicApi>.value(value: api),
         ChangeNotifierProvider<PlayerProvider>.value(value: createdPlayer),
         ChangeNotifierProvider<SettingsProvider>.value(value: settings),
+        ChangeNotifierProvider<UpdateProvider>.value(value: updates),
         ChangeNotifierProvider<AccountProvider>.value(value: account),
-        ChangeNotifierProvider<AppShellController>(create: (_) => AppShellController()),
+        ChangeNotifierProvider<AppShellController>(
+          create: (_) => AppShellController(),
+        ),
         ChangeNotifierProvider<DesktopLyricsProvider>(
           create: (context) => DesktopLyricsProvider(
             createdPlayer,
@@ -111,12 +139,44 @@ Future<void> main() async {
         ChangeNotifierProvider<ImportedPlaylistProvider>.value(
           value: importedPlaylists,
         ),
-        ChangeNotifierProvider<PlaylistProvider>(create: (_) => PlaylistProvider(api)),
+        ChangeNotifierProvider<PlaylistProvider>(
+          create: (_) => PlaylistProvider(api),
+        ),
         Provider<GlobalHotkeyService>.value(value: hotkeys),
       ],
       child: const MiguLeleApp(),
     ),
   );
+
+  // 启动检查不挡首帧；关了开关或刚查过，服务里会自己跳过。
+  unawaited(updates.checkOnStartup());
+}
+
+Future<void> _warmUpSession(AccountProvider account, MiguMusicApi api) async {
+  final epoch = account.credentialEpoch;
+  var probe = SessionProbe.unknown;
+  try {
+    probe = await api
+        .checkSessionAlive(trigger: 'startup')
+        .timeout(
+          const Duration(seconds: 8),
+          onTimeout: () => SessionProbe.unknown,
+        );
+  } catch (_) {
+    probe = SessionProbe.unknown;
+  }
+  if (!account.hasLogin || account.credentialEpoch != epoch) return;
+  if (probe == SessionProbe.revoked) {
+    // 校验接口只拿 pacmtoken 说话，它说失效就不必等下一次保活（45–75 分钟）：
+    // 直接交给账号层做两步判定。资料与歌单由这条路径自己刷，
+    // 这里再并发拉一次只会用旧凭据盖掉判定结果。
+    account.markSessionRevoked();
+    return;
+  }
+  if (probe == SessionProbe.alive) account.markVerified();
+  // 校验失败也照常拉资料：真正的拒绝由拦截器取证，网络失败不会记成证据。
+  unawaited(account.refreshProfile());
+  unawaited(account.refreshLibrary());
 }
 
 Future<void> _configureDesktopWindow(SettingsProvider settings) async {
@@ -135,7 +195,9 @@ Future<void> _configureDesktopWindow(SettingsProvider settings) async {
       minimumSize: const Size(920, 640),
       center: true,
       title: AppConstants.appName,
-      backgroundColor: dark ? AppColors.darkBackground : AppColors.lightBackground,
+      backgroundColor: dark
+          ? AppColors.darkBackground
+          : AppColors.lightBackground,
       titleBarStyle: TitleBarStyle.hidden,
     );
     unawaited(

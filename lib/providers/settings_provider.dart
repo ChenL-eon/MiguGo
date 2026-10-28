@@ -38,6 +38,7 @@ class SettingsProvider extends ChangeNotifier {
   static const _playerBackgroundKey = 'player_background_v1';
   static const _playerBackgroundBlurKey = 'player_background_blur_v1';
   static const _playerBackgroundImageKey = 'player_background_image_v1';
+  static const _backgroundKeepAliveKey = 'background_keep_alive_v1';
 
   static const ThemeMode defaultThemeMode = ThemeMode.system;
   static const ThemeAccent defaultThemeAccent = ThemeAccent.rose;
@@ -84,6 +85,7 @@ class SettingsProvider extends ChangeNotifier {
   PlayerBackground _playerBackground = PlayerBackground.cover;
   int _playerBackgroundBlur = defaultPlayerBackgroundBlur;
   String? _playerBackgroundImage;
+  bool _backgroundKeepAliveEnabled = false;
   bool _loaded = false;
 
   bool get loaded => _loaded;
@@ -123,6 +125,9 @@ class SettingsProvider extends ChangeNotifier {
 
   /// 自定义背景图片的本地绝对路径；未选择或文件已失效时为 null。
   String? get playerBackgroundImage => _playerBackgroundImage;
+
+  /// 关闭主窗口后是否常驻托盘继续保活登录态。只在 Windows 有意义，默认关。
+  bool get backgroundKeepAliveEnabled => _backgroundKeepAliveEnabled;
 
   Future<void> load() async {
     if (_loaded) return;
@@ -189,6 +194,8 @@ class SettingsProvider extends ChangeNotifier {
       defaultPlayerBackgroundBlur,
     ).clamp(minPlayerBackgroundBlur, maxPlayerBackgroundBlur);
     _playerBackgroundImage = _readOptionalString(_playerBackgroundImageKey);
+    _backgroundKeepAliveEnabled =
+        _preferences?.getBool(_backgroundKeepAliveKey) ?? false;
 
     _loaded = true;
     notifyListeners();
@@ -377,6 +384,13 @@ class SettingsProvider extends ChangeNotifier {
     if (_recordSearchHistoryEnabled == enabled) return;
     _recordSearchHistoryEnabled = enabled;
     await _preferences?.setBool(_recordSearchHistoryKey, enabled);
+    notifyListeners();
+  }
+
+  Future<void> setBackgroundKeepAliveEnabled(bool enabled) async {
+    if (_backgroundKeepAliveEnabled == enabled) return;
+    _backgroundKeepAliveEnabled = enabled;
+    await _preferences?.setBool(_backgroundKeepAliveKey, enabled);
     notifyListeners();
   }
 

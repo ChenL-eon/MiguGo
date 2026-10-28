@@ -17,8 +17,8 @@ import '../widgets/ambient_background.dart';
 import '../widgets/login_feedback.dart';
 
 const String _webView2Unavailable =
-    '无法初始化 Windows WebView2 环境。请确认已安装 Microsoft Edge WebView2 Runtime，'
-    '然后点击“重新加载”重试。';
+    '无法初始化 Windows WebView2 环境——可能未安装 Microsoft Edge WebView2 Runtime，'
+    '或初始化在 45 秒内没有返回。请点击“重新加载”重试；反复如此请彻底退出本应用后重新打开。';
 
 const List<String> _cookieProbeUrls = [
   'https://music.migu.cn/v5/',

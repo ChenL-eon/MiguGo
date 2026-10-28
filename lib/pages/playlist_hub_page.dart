@@ -642,13 +642,6 @@ class _ImportCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(24),
               border: Border.all(color: context.palette.line),
               color: context.palette.surfaceHigh,
-              boxShadow: [
-                BoxShadow(
-                  color: context.palette.shadow.withValues(alpha: 0.18),
-                  blurRadius: 28,
-                  offset: const Offset(0, 14),
-                ),
-              ],
             ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

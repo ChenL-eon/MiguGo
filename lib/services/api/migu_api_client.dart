@@ -21,6 +21,14 @@ bool isLoginScopedEndpoint(Uri uri) {
       path.contains('/pc/user/h5/queryUserInfo/');
 }
 
+/// 官方会话校验接口：它只认 `pacmtoken` 这一份凭据，别的都不需要。
+///
+/// 因此它的「未登录」是凭据本身被拒的直接证据；账号接口做不到这一点——
+/// 不带凭据、只带一个假 `pacmtoken`、假 `pacmtoken` 再加 `uid`，三种请求
+/// 回的都是同一句 `290001 请先登录`（2026-10-25 实测），分不清是过期还是缺参数。
+bool isSessionValidatorEndpoint(Uri uri) =>
+    uri.path.toLowerCase().contains('checkpacmtoken');
+
 /// Dio 封装：统一附带 Referer、设备标识、账号 Cookie，并维护服务端下发的会话 Cookie。
 class MiguApiClient {
   MiguApiClient({
@@ -103,6 +111,7 @@ class MiguApiClient {
   }
 
   static const String _sessionEpochKey = 'migu_session_epoch';
+  static const String _deferSessionVerdictKey = 'migu_defer_session_verdict';
 
   final Dio _dio;
   final MiguCookieStore cookieStore;
@@ -124,8 +133,9 @@ class MiguApiClient {
 
   /// 记下一次「咪咕回绝本机凭据」的证据。
   ///
-  /// 证据一律留下（项目没有日志文件，界面是唯一出口）；但只有**要求登录的账号接口**
-  /// 且本机确实带过 `pacmtoken` 时才计入失效判定并回报上层，公开接口的 401 只算参考。
+  /// 证据一律留下（项目没有日志文件，界面是唯一出口）；但只有说得出凭据本身的事才
+  /// 计入失效判定并回报上层：本机带得出 `uid` 时的账号接口，以及只看 `pacmtoken` 的
+  /// 官方会话校验接口。公开接口的 401、缺 `uid` 的账号接口都只算参考。
   ///
   /// [evidenceGrade] 为假表示这次拒绝只能留档：403 既可能是 Cookie 失效，也可能
   /// 只是这个账号没有那首歌的权限，分不清就不能拿它判死凭据。
@@ -136,8 +146,19 @@ class MiguApiClient {
     String info = '',
     bool evidenceGrade = true,
   }) {
-    final sentCredentials = cookieStore.credentials.pacmtoken != null;
-    final loginScoped = evidenceGrade && isLoginScopedEndpoint(uri) && sentCredentials;
+    final credentials = cookieStore.credentials;
+    final sentCredentials = credentials.pacmtoken != null;
+    final validator = isSessionValidatorEndpoint(uri);
+    // 原生登录没有 uid；账号接口可能把「缺 uid」也回成 290001，
+    // 不能让一条分不清原因的拒绝顶替真正的会话失效证据。只认 pacmtoken 的
+    // 官方校验接口不受这个问题影响，它说没登录就是这份凭据不被接受。
+    final identityReady =
+        validator || (!_identityNeededForEvidence(uri) || credentials.uid != null);
+    final loginScoped =
+        evidenceGrade &&
+        identityReady &&
+        (validator || isLoginScopedEndpoint(uri)) &&
+        sentCredentials;
     _ledger.note(
       uri: uri,
       status: status,
@@ -149,11 +170,22 @@ class MiguApiClient {
     onSessionRevoked?.call();
   }
 
-  /// 从响应里判断这是不是一次「咪咕回绝本机凭据」，并就地取证。
+  /// 这些账号接口缺 `uid` 时也会回 `290001 请先登录`，跟凭据无关。
   ///
-  /// 只有在这里判断才拿得到真实请求地址，业务码 `290001 请先登录` 也才是 HTTP 200，
-  /// 拦截器以外的层只能看到一个 payload，分不清它是哪个接口回来的。
+  /// 原生登录本机没有 `uid`，少了参数就是这副回包。漏掉任何一条，一次缺参数的
+  /// 回绝都会被记成失效证据，攒够两次还会把还好用的凭据自动退掉。
+  static bool _identityNeededForEvidence(Uri uri) {
+    final path = uri.path;
+    return path.contains('/pc/user/home-page/') ||
+        path.contains('/pc/user/h5/queryUserInfo/') ||
+        path.contains('/user/h5/user-info/');
+  }
+
+  void noteAuthSuccess() => _ledger.resetStrikes();
+
+  /// 完整探测延后裁决，避免账号资料兜底前被单条拒绝清掉凭据。
   void _noteFailure(Response<dynamic> response) {
+    if (response.requestOptions.extra[_deferSessionVerdictKey] == true) return;
     final status = response.statusCode ?? 0;
     final uri = response.requestOptions.uri;
     if (status == 401 || status == 403) {
@@ -173,15 +205,22 @@ class MiguApiClient {
     if (map == null) return;
     final code = readString(map['code']).trim();
     if (_isSuccessCode(code)) {
-      // 要求登录的账号接口成功回包，就是这份凭据仍被接受的最直接证据。
-      if (isLoginScopedEndpoint(uri)) _ledger.resetStrikes();
+      // 要求登录的账号接口与官方校验接口成功回包，都是这份凭据仍被接受的最直接证据。
+      // 空编码可能是错误页，官方校验接口只有明确回了成功码才算数。
+      final provesAlive =
+          isLoginScopedEndpoint(uri) ||
+          (isSessionValidatorEndpoint(uri) && code.isNotEmpty);
+      if (provesAlive) _ledger.resetStrikes();
       return;
     }
     final info = _readInfo(map);
-    if (classifySessionProbe(status: status, code: code, info: info) !=
-        SessionProbe.revoked) {
-      return;
-    }
+    // 官方校验接口专属的那几个码不必再看文案就已经是结论：它只拿 pacmtoken 说话。
+    final revoked =
+        (isSessionValidatorEndpoint(uri) &&
+            sessionValidatorRevokedCodes.contains(code)) ||
+        classifySessionProbe(status: status, code: code, info: info) ==
+            SessionProbe.revoked;
+    if (!revoked) return;
     noteAuthFailure(uri: uri, status: status, code: code, info: info);
   }
 
@@ -209,6 +248,7 @@ class MiguApiClient {
     Map<String, String>? headers,
     bool followRedirects = true,
     ResponseType responseType = ResponseType.json,
+    bool deferSessionVerdict = false,
   }) async {
     try {
       return await _dio.get<dynamic>(
@@ -216,6 +256,7 @@ class MiguApiClient {
         queryParameters: query,
         options: Options(
           headers: headers,
+          extra: {_deferSessionVerdictKey: deferSessionVerdict},
           followRedirects: followRedirects,
           responseType: responseType,
           validateStatus: (status) => status != null && status < 600,

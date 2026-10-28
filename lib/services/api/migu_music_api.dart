@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../../core/constants/app_constants.dart';
 import '../../core/utils/json_read.dart';
+import '../../core/utils/migu_urls.dart';
 import '../../models/account_library.dart';
 import '../../models/audio_quality.dart';
 import '../../models/home_feed.dart';
@@ -11,6 +14,7 @@ import '../../models/migu_user_profile.dart';
 import '../../models/playlist.dart';
 import '../../models/song.dart';
 import '../auth/session_probe.dart';
+import '../auth/session_probe_diagnostics.dart';
 import 'migu_api_client.dart';
 import 'migu_api_exception.dart';
 import 'migu_response_cipher.dart';
@@ -24,6 +28,7 @@ class MiguMusicApi {
   /// [onSessionRevoked] 挂在默认构造的 [MiguApiClient] 上；注入 client 时由调用方自行挂载。
   MiguMusicApi({
     MiguApiClient? client,
+    this.diagnostics,
     this.onAuthVerified,
     this.onAuthRejected,
     this.sessionEpoch,
@@ -37,6 +42,8 @@ class MiguMusicApi {
 
   final MiguApiClient client;
 
+  final SessionProbeDiagnostics? diagnostics;
+
   /// 带登录凭据的 VIP 播放请求成功后回调，用于把状态更新为“已验证”。
   final void Function()? onAuthVerified;
 
@@ -45,6 +52,13 @@ class MiguMusicApi {
 
   /// 当前凭据代数；播放请求发起时记下，回包时只允许仍属于当前会话的结果改状态。
   final int Function()? sessionEpoch;
+
+  /// 在飞的 `checkPacMtoken` 与它所属的登录代际，用于单飞。
+  ///
+  /// 启动预热与前台保活可能同时探测：两次都成功就各写一次轮换结果，而咪咕不给
+  /// 版本信息，谁后落地无从判断新旧。同一次登录会话里让后来者复用同一次请求即可。
+  Future<Response<dynamic>>? _pacmCheckInFlight;
+  String? _pacmCheckGeneration;
 
   bool get hasImportedLogin => client.cookieStore.hasImportedLogin;
 
@@ -100,9 +114,14 @@ class MiguMusicApi {
     _ensureBusinessOk(payload);
     final root = readMap(payload);
     final data =
-        readMap(root?['data']) ?? readMap(root?['userInfo']) ?? readMap(root?['user']);
+        readMap(root?['data']) ??
+        readMap(root?['userInfo']) ??
+        readMap(root?['user']);
     if (data == null) {
-      throw const MiguApiException('账号资料暂时无法读取。', kind: MiguErrorKind.invalidResponse);
+      throw const MiguApiException(
+        '账号资料暂时无法读取。',
+        kind: MiguErrorKind.invalidResponse,
+      );
     }
 
     var profile = MiguUserProfile.fromPayload(data);
@@ -113,40 +132,285 @@ class MiguMusicApi {
     if (profile.nickname.isEmpty &&
         profile.avatarUrl.isEmpty &&
         profile.userId.isEmpty) {
-      throw const MiguApiException('账号资料暂时无法读取。', kind: MiguErrorKind.invalidResponse);
+      throw const MiguApiException(
+        '账号资料暂时无法读取。',
+        kind: MiguErrorKind.invalidResponse,
+      );
     }
     return profile;
   }
 
-  /// 探一次登录态：只用本机已有凭据请求账号资料。
+  /// 探一次登录态：先走官方网页同款的会话校验/轮换，再用账号资料兜底。
   ///
-  /// 网页端还在用 `/pc/user/h5/queryUserInfo/v1.0`，但它要求官方签名上下文里的
-  /// `uid`；本机凭据失效时它只会回 `299999 uid不能为空`，信号不如
-  /// `/user/h5/user-info/v1.0` 明确（失效回 `290001 请先登录`），因此探后者。
+  /// `checkPacMtoken` 只带 `pacmtoken` 请求头，成功码 `000000`，轮换后的新值
+  /// 可能放在响应头里。官方网页每次打开都会调用它；但“轮换会延长服务端
+  /// 有效期”尚未用真实账号验证。原生登录只留一张一次性票据，光靠
+  /// `token-validate` 无法稳定换到新会话，所以保活仍以这个接口的可用性为准。
   ///
-  /// 门槛只看 `pacmtoken`：原生通行证登录只拿到这一份凭据，`uid` 是网页快照才有的
-  /// 同名 Cookie。要求 `uid` 会让原生登录账号的保活永不发请求；而账号资料接口本身
-  /// 并不要求 `uid`（`fetchUserProfile` 同样不带 `uid` 也在用这个地址）。缺 `uid`
-  /// 时最坏是回一条说不清的失败，`classifySessionProbe` 把它归到 unknown，不会误判失效。
-  /// 这里只做只读探测，不请求任何续期接口，也不会替用户重新登录。
-  Future<SessionProbe> checkSessionAlive() async {
+  /// 校验接口失败（尤其是 `850003 内部错误`）时不能直接判死：再用账号资料确认。
+  /// 账号资料用 `/user/h5/user-info/v1.0`，但它对「不带凭据」「假 pacmtoken」
+  /// 「假 pacmtoken 再加 uid」回的是同一句 `290001 请先登录`（2026-10-25 实测），
+  /// 所以本机没有 `uid` 时它的拒绝只算参考，不判失效；`/pc/user/h5/queryUserInfo/v1.0`
+  /// 更是任何时候都先回 `299999 uid不能为空`，根本读不出登录态。
+  ///
+  /// 门槛只看 `pacmtoken`。两个探测都看不懂时返回 unknown，绝不误判失效。
+  ///
+  /// [trigger] 只用于调试版的探测记录，区分启动检查与前台保活。
+  Future<SessionProbe> checkSessionAlive({
+    String trigger = 'unspecified',
+  }) async {
+    final trace = _SessionProbeTrace(
+      at: DateTime.now(),
+      trigger: trigger,
+      loginGeneration: client.cookieStore.webSyncToken,
+      epoch: sessionEpoch?.call(),
+    );
+    // 这次探测真正带出去的凭据是哪个版本：只记指纹，不记值。
+    trace.credentialBefore = client.cookieStore.credentialFingerprint;
+    trace.credentialSource = client.cookieStore.credentialSource;
     final credentials = client.cookieStore.credentials;
-    if (credentials.pacmtoken == null) return SessionProbe.unknown;
-    try {
-      final response = await client.getRaw(AppConstants.userProfileUrl);
-      final map = readMap(response.data);
-      return classifySessionProbe(
-        status: response.statusCode ?? 0,
-        code: readString(map?['code']),
-        info: readString(map?['info'] ?? map?['msg']),
+    if (credentials.pacmtoken == null) {
+      trace.addNote('本机没有 pacmtoken');
+      return _recordProbe(trace, SessionProbe.unknown);
+    }
+
+    trace.expiryBefore = client.cookieStore.credentialExpiresAt;
+    final official = await _probePacmCheck(trace);
+    trace.officialRejected = official == SessionProbe.revoked;
+    if (!_isCurrentProbe(trace)) {
+      trace.addNote('探测期间登录代际已变化');
+      return _recordProbe(trace, SessionProbe.unknown);
+    }
+    if (official == SessionProbe.alive) {
+      return _recordProbe(trace, SessionProbe.alive);
+    }
+
+    final profile = await _probeProfile(trace);
+    if (profile == SessionProbe.alive) {
+      return _recordProbe(trace, SessionProbe.alive);
+    }
+    if (official == SessionProbe.revoked) {
+      return _recordProbe(trace, SessionProbe.revoked);
+    }
+    final profileRevoked = profile == SessionProbe.revoked;
+    // 账号资料接口对「缺 uid」也回同一句 290001：本机没有 uid 时它分不清是凭据过期
+    // 还是这份凭据集不够用，不能拿它判死。只有官方校验接口单独看 pacmtoken。
+    if (profileRevoked && client.cookieStore.credentials.uid == null) {
+      trace.addNote('账号资料回绝，但本机没有 uid，不计为失效');
+      return _recordProbe(trace, SessionProbe.unknown);
+    }
+    return _recordProbe(
+      trace,
+      profileRevoked ? SessionProbe.revoked : SessionProbe.unknown,
+    );
+  }
+
+  bool _isCurrentProbe(_SessionProbeTrace trace) =>
+      trace.loginGeneration != null &&
+      trace.loginGeneration == client.cookieStore.webSyncToken &&
+      _isCurrentSession(trace.epoch);
+
+  Future<SessionProbe> _recordProbe(
+    _SessionProbeTrace trace,
+    SessionProbe verdict,
+  ) async {
+    if (!_isCurrentProbe(trace)) verdict = SessionProbe.unknown;
+    if (kDebugMode) {
+      // 只有指纹和来源，能回答「这次到底拿哪一份凭据去问的」，不含可复用的值。
+      debugPrint(
+        '登录探测 ${trace.trigger} → ${verdict.name}；'
+        '凭据 ${trace.credentialBefore} → ${trace.credentialAfter ?? '未走到写回'}'
+        '（来源 ${trace.credentialSource}）',
       );
-    } on MiguApiException catch (error) {
-      return error.kind == MiguErrorKind.authRequired
+    }
+    final diagnostics = this.diagnostics;
+    if (diagnostics != null) {
+      try {
+        await diagnostics.record(trace.toRecord(verdict));
+      } catch (_) {
+        // 诊断是旁路，不能影响登录态判定。
+      }
+    }
+    if (!_isCurrentProbe(trace)) return SessionProbe.unknown;
+    if (verdict == SessionProbe.alive) {
+      client.noteAuthSuccess();
+    } else if (verdict == SessionProbe.revoked) {
+      final official = trace.officialRejected;
+      client.noteAuthFailure(
+        uri: Uri.parse(
+          official ? AppConstants.pacmCheckUrl : AppConstants.userProfileUrl,
+        ),
+        status: (official ? trace.officialStatus : trace.profileStatus) ?? 0,
+        code: official ? trace.officialCode : trace.profileCode,
+        info: official ? trace.officialInfo : trace.profileInfo,
+      );
+    }
+    return verdict;
+  }
+
+  static const Set<String> _pacmSuccessCodes = {'000000', '0000', '0', '200'};
+
+  Future<SessionProbe> _probePacmCheck(_SessionProbeTrace trace) async {
+    final store = client.cookieStore;
+    final generation = store.webSyncToken;
+    // 本机凭证被写回过的次数：轮换头与服务端 Set-Cookie 两条通道都算。
+    // 只用来回答「这次探测期间本机凭证动过没有」，不参与判断哪一份更新。
+    int writesSoFar() {
+      final stats = store.credentialWriteStats;
+      return stats.rotationWrites + stats.cookieWrites;
+    }
+
+    final writesBefore = writesSoFar();
+    try {
+      final response = await _pacmCheckShared(generation, trace);
+      final status = response.statusCode ?? 0;
+      trace.officialStatus = status;
+      if (status == 401) return SessionProbe.revoked;
+      if (status < 200 || status >= 300) return SessionProbe.unknown;
+
+      final map = readMap(response.data);
+      final code = readString(
+        map?['code'] ??
+            map?['businesscode'] ??
+            response.headers.value('businesscode'),
+      ).trim();
+      trace.officialCode = code;
+      final info = readString(map?['info'] ?? map?['msg']);
+      trace.officialInfo = info;
+      if (_pacmSuccessCodes.contains(code)) {
+        trace.rotationHeader =
+            response.headers.value('pacmtoken')?.trim().isNotEmpty ?? false;
+        trace.expiryFromResponse = store.credentialExpiresAt;
+        // 写回只认发起这次探测时的那一代登录：期间退出或换号，结果属于上一份会话。
+        trace.rotated = await _persistRotatedPacmtoken(
+          response,
+          loginGeneration: generation,
+        );
+        trace.expiryAfter = store.credentialExpiresAt;
+        trace.credentialAfter = store.credentialFingerprint;
+        trace.credentialHeaderMatches = store.credentialHeaderMatches(
+          Uri.parse(AppConstants.pacmCheckUrl),
+        );
+        // 轮换也可能走 Set-Cookie 那条通道：轮换头没写进东西但本机确实落过一次凭证，
+        // 同样算换过。这里比的是「本机有没有发生写回」，不比凭证值的新旧——期间换号
+        // 时值也变了，却不是这次探测换的，按值比会把「盖不进去」误报成「轮换成功」。
+        if (!trace.rotated && writesSoFar() > writesBefore) {
+          trace.rotated = true;
+        }
+        return SessionProbe.alive;
+      }
+
+      if (sessionValidatorRevokedCodes.contains(code)) {
+        return SessionProbe.revoked;
+      }
+
+      // 空编码可能是错误页；用占位编码让文案仍然参与判断，但不把空白当成功。
+      final verdict = classifySessionProbe(
+        status: status,
+        code: code.isEmpty ? 'unknown' : code,
+        info: info,
+      );
+      return verdict == SessionProbe.revoked
           ? SessionProbe.revoked
           : SessionProbe.unknown;
+    } on MiguApiException catch (error) {
+      final rejected = error.kind == MiguErrorKind.authRequired;
+      trace.addNote(rejected ? '官方校验明确拒绝凭据' : '官方校验请求异常');
+      return rejected ? SessionProbe.revoked : SessionProbe.unknown;
     } catch (_) {
+      trace.addNote('官方校验请求异常');
       return SessionProbe.unknown;
     }
+  }
+
+  /// 同一次登录代际里，只让一次 `checkPacMtoken` 在飞。
+  ///
+  /// 启动预热、前台保活与手动检查可能撞在一起，两次都成功就会各写一次轮换结果；
+  /// 咪咕不给凭证版本，谁后落地才是「新的」根本判断不了，所以让后来者复用同一次
+  /// 请求的结果。写回本身是幂等的，两次复用同一份响应也只会落地一次。
+  ///
+  /// [generation] 为 null（未登录）时不做复用：那时没有会话可归属，各探各的。
+  Future<Response<dynamic>> _pacmCheckShared(
+    String? generation,
+    _SessionProbeTrace trace,
+  ) {
+    final inFlight = _pacmCheckInFlight;
+    if (generation != null &&
+        inFlight != null &&
+        _pacmCheckGeneration == generation) {
+      trace.probeShared = true;
+      return inFlight;
+    }
+    final future = client.getRaw(
+      AppConstants.pacmCheckUrl,
+      deferSessionVerdict: true,
+    );
+    _pacmCheckInFlight = future;
+    _pacmCheckGeneration = generation;
+    final settled = future.whenComplete(() {
+      // 只结束自己那一次：期间可能已经换号并登记了新的一轮探测。
+      if (identical(_pacmCheckInFlight, future)) {
+        _pacmCheckInFlight = null;
+        _pacmCheckGeneration = null;
+      }
+    });
+    // 错误留给调用方处理；这条派生链只负责收尾，不能第二次抛出未捕获异常。
+    unawaited(settled.then<void>((_) {}, onError: (Object _) {}));
+    return future;
+  }
+
+  Future<SessionProbe> _probeProfile(_SessionProbeTrace trace) async {
+    try {
+      final response = await client.getRaw(
+        AppConstants.userProfileUrl,
+        deferSessionVerdict: true,
+      );
+      trace.profileStatus = response.statusCode ?? 0;
+      final map = readMap(response.data);
+      final code = readString(map?['code']);
+      trace.profileCode = code;
+      trace.profileInfo = readString(map?['info'] ?? map?['msg']);
+      return classifySessionProbe(
+        status: response.statusCode ?? 0,
+        code: code,
+        info: trace.profileInfo,
+      );
+    } on MiguApiException catch (error) {
+      final rejected = error.kind == MiguErrorKind.authRequired;
+      trace.addNote(rejected ? '账号资料明确拒绝凭据' : '账号资料请求异常');
+      return rejected ? SessionProbe.revoked : SessionProbe.unknown;
+    } catch (_) {
+      trace.addNote('账号资料请求异常');
+      return SessionProbe.unknown;
+    }
+  }
+
+  /// 官方校验通过时把轮换后的 `pacmtoken` 写回本机。
+  ///
+  /// 只认响应头里的单值，不猜服务端文案；写回交给 Cookie 仓库统一处理，
+  /// 主名与网页别名成对更新。[loginGeneration] 是发起这次探测时的登录代际，
+  /// 期间退出或换号就不写，旧会话的结果不能盖到新凭据上。
+  Future<bool> _persistRotatedPacmtoken(
+    Response<dynamic> response, {
+    required String? loginGeneration,
+  }) async {
+    final raw = response.headers.value('pacmtoken')?.trim() ?? '';
+    if (raw.isEmpty) return false;
+    var value = raw;
+    if (value.toLowerCase().startsWith('pacmtoken=')) {
+      value = value.substring('pacmtoken='.length).trim();
+    }
+    value = value.split(';').first.trim();
+    if (value.isEmpty ||
+        value.length > 2048 ||
+        value.contains(RegExp(r'[\s;]'))) {
+      return false;
+    }
+    if (value == client.cookieStore.credentials.pacmtoken) return false;
+    final changed = await client.cookieStore.applyRenewedCredentials({
+      'pacmtoken': value,
+    }, loginGeneration: loginGeneration);
+    return changed > 0;
   }
 
   Future<bool> _fetchVipBadge() async {
@@ -174,7 +438,10 @@ class MiguMusicApi {
     _ensureBusinessOk(payload);
     final data = readMap(payload is Map ? payload['data'] : null);
     if (data == null) {
-      throw const MiguApiException('账号歌单暂时无法读取。', kind: MiguErrorKind.invalidResponse);
+      throw const MiguApiException(
+        '账号歌单暂时无法读取。',
+        kind: MiguErrorKind.invalidResponse,
+      );
     }
     return AccountLibrary.fromHomePageJson(data);
   }
@@ -321,12 +588,19 @@ class MiguMusicApi {
 
   /// 免费曲目：登录账号且选择了更高音质时先走策略接口，失败再回退标准音质；
   /// 未登录时直接使用无需权益的 listenSong.do，保证任何情况下都能试听。
-  Future<String> _resolveFreePlaybackUrl(Song song, AudioQuality quality) async {
+  Future<String> _resolveFreePlaybackUrl(
+    Song song,
+    AudioQuality quality,
+  ) async {
     if (quality != AudioQuality.pq && hasImportedLogin) {
       try {
         // 免费曲目的高音质尝试不作为登录有效性的判据；
         // 认证状态交给后面的 listenSong.do 请求决定。
-        final result = await _tryStrategyPlaybackUrl(song, quality, reportAuth: false);
+        final result = await _tryStrategyPlaybackUrl(
+          song,
+          quality,
+          reportAuth: false,
+        );
         final url = result.url;
         if (url != null) return url;
       } on MiguApiException {
@@ -427,7 +701,10 @@ class MiguMusicApi {
     }
 
     if (status >= 500) {
-      throw const MiguApiException('咪咕服务暂时无法提供播放链接，请稍后再试。', kind: MiguErrorKind.server);
+      throw const MiguApiException(
+        '咪咕服务暂时无法提供播放链接，请稍后再试。',
+        kind: MiguErrorKind.server,
+      );
     }
 
     throw const MiguApiException(
@@ -481,7 +758,8 @@ class MiguMusicApi {
   }
 
   /// 按所选音质从高到低请求播放策略接口；返回最后一级的失败信息用于提示。
-  Future<({String? url, String? cannotCode, String? dialog})> _tryStrategyPlaybackUrl(
+  Future<({String? url, String? cannotCode, String? dialog})>
+  _tryStrategyPlaybackUrl(
     Song song,
     AudioQuality quality, {
     bool reportAuth = true,
@@ -499,7 +777,8 @@ class MiguMusicApi {
     return last ?? (url: null, cannotCode: null, dialog: null);
   }
 
-  Future<({String? url, String? cannotCode, String? dialog})> _requestStrategyListen(
+  Future<({String? url, String? cannotCode, String? dialog})>
+  _requestStrategyListen(
     Song song,
     String toneFlag, {
     bool reportAuth = true,
@@ -563,7 +842,10 @@ class MiguMusicApi {
       );
     }
     if (status >= 500) {
-      throw const MiguApiException('咪咕服务暂时无法提供播放链接，请稍后再试。', kind: MiguErrorKind.server);
+      throw const MiguApiException(
+        '咪咕服务暂时无法提供播放链接，请稍后再试。',
+        kind: MiguErrorKind.server,
+      );
     }
     if (status < 200 || status >= 300) {
       throw MiguApiException(
@@ -589,10 +871,13 @@ class MiguMusicApi {
       );
     }
 
-    final url = _extractDirectUrl(payload);
-    if (url != null) return (url: url, cannotCode: null, dialog: null);
-
     final data = readMap(payload['data']);
+    final url = _extractDirectUrl(payload);
+    if (url != null) {
+      _logActualQuality(toneFlag, data?['audioFormatType']);
+      return (url: url, cannotCode: null, dialog: null);
+    }
+
     final dialog = readString(readMap(data?['dialogInfo'])?['text']).trim();
     final cannotCode = readString(data?['cannotCode']).trim();
     return (
@@ -600,6 +885,15 @@ class MiguMusicApi {
       cannotCode: cannotCode.isEmpty ? null : cannotCode,
       dialog: dialog.isEmpty ? null : dialog,
     );
+  }
+
+  /// 服务端可能静默降级（如请求 ZQ24 实发 SQ），记录实际档位便于诊断。
+  void _logActualQuality(String requestedFlag, dynamic rawActual) {
+    final actual = readString(rawActual).trim().toUpperCase();
+    if (actual.isEmpty || actual == requestedFlag) return;
+    final known = AudioQuality.values.any((item) => item.toneFlag == actual);
+    if (!known) return;
+    debugPrint('咪咕按 $actual 发放（请求 $requestedFlag）');
   }
 
   /// 播放策略接口的响应体是站点自身编码；同时兼容明文 JSON。
@@ -612,22 +906,61 @@ class MiguMusicApi {
     return _decodeBody(data);
   }
 
-  /// 读取 LRC 歌词；当搜索/歌单条目缺少歌词地址时，用单曲名做一次公开搜索补全。
+  /// 读取 LRC 歌词：优先歌曲自带地址；地址缺失或内容不是同步歌词时，
+  /// 依次尝试 resourceinfo 按 contentId 取址、搜索补全。
   Future<String?> fetchLyrics(Song song) async {
-    var lyricUrl = song.lyricUrl;
+    final attempted = <String>{};
 
-    if (lyricUrl == null || lyricUrl.isEmpty) {
-      lyricUrl = await _findLyricUrlBySearch(song);
-    }
-    if (lyricUrl == null || lyricUrl.isEmpty) return null;
+    final direct = await _fetchLyricText(song.lyricUrl, attempted);
+    if (direct != null) return direct;
+
+    final resourceUrl = await _findLyricUrlByResourceInfo(song);
+    final fromResource = await _fetchLyricText(resourceUrl, attempted);
+    if (fromResource != null) return fromResource;
+
+    final searchedUrl = await _findLyricUrlBySearch(song);
+    return _fetchLyricText(searchedUrl, attempted);
+  }
+
+  Future<String?> _fetchLyricText(String? rawUrl, Set<String> attempted) async {
+    final url = resolveMiguAssetUrl(rawUrl);
+    if (url == null || url.isEmpty || !attempted.add(url)) return null;
 
     try {
-      final text = await client.getText(lyricUrl);
+      final text = await client.getText(url);
       final normalized = text.replaceFirst('\uFEFF', '').trim();
       if (normalized.isEmpty) return null;
       final hasTimestamp = RegExp(r'\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]')
           .hasMatch(normalized);
       return hasTimestamp ? normalized : null;
+    } on MiguApiException {
+      return null;
+    }
+  }
+
+  Future<String?> _findLyricUrlByResourceInfo(Song song) async {
+    if (song.contentId.isEmpty) return null;
+
+    try {
+      final payload = await client.getJson(
+        AppConstants.resourceInfoUrl,
+        query: {'resourceId': song.contentId, 'resourceType': 2},
+      );
+      final root = readMap(payload);
+      if (root == null) return null;
+
+      final code = readString(root['code']).trim();
+      if (code.isNotEmpty && code != '000000' && code != '200') return null;
+
+      var resources = readList(root['resource']);
+      if (resources.isEmpty) {
+        resources = readList(readMap(root['data'])?['resource']);
+      }
+      for (final item in resources) {
+        final url = readString(readMap(item)?['lrcUrl']).trim();
+        if (url.isNotEmpty) return url;
+      }
+      return null;
     } on MiguApiException {
       return null;
     }
@@ -647,7 +980,9 @@ class MiguMusicApi {
           exact = candidate;
           break;
         }
-        if (sameName == null && candidate.name == song.name && candidate.hasLyric) {
+        if (sameName == null &&
+            candidate.name == song.name &&
+            candidate.hasLyric) {
           sameName = candidate;
         }
       }
@@ -671,7 +1006,9 @@ class MiguMusicApi {
         SessionProbe.revoked;
     throw MiguApiException(
       info.isEmpty ? '咪咕服务返回异常（$code）。' : '咪咕服务返回异常：$info',
-      kind: revoked ? MiguErrorKind.authRequired : MiguErrorKind.invalidResponse,
+      kind: revoked
+          ? MiguErrorKind.authRequired
+          : MiguErrorKind.invalidResponse,
       loginRequired: revoked,
     );
   }
@@ -720,4 +1057,70 @@ class MiguMusicApi {
     if (failure == null) return false;
     return const {'200003', '200004', '403'}.contains(failure.code);
   }
+}
+
+/// 探测裁决所需的会话与响应信息，接入诊断时另存脱敏记录。
+class _SessionProbeTrace {
+  _SessionProbeTrace({
+    required this.at,
+    required this.trigger,
+    required this.loginGeneration,
+    required this.epoch,
+  });
+
+  final DateTime at;
+  final String trigger;
+  final String? loginGeneration;
+  final int? epoch;
+  bool officialRejected = false;
+  int? officialStatus;
+  String officialCode = '';
+  String officialInfo = '';
+  bool rotationHeader = false;
+  bool rotated = false;
+  DateTime? expiryBefore;
+  DateTime? expiryFromResponse;
+  DateTime? expiryAfter;
+  int? profileStatus;
+  String profileCode = '';
+  String profileInfo = '';
+  String note = '';
+
+  /// 探测时带出去的凭据指纹，以及写回检查后的指纹（null = 这一轮没走到写回）。
+  String credentialBefore = '无';
+  String credentialSource = 'none';
+  String? credentialAfter;
+
+  /// 复用了一次已在飞的官方校验；轮换写回只跟着那一次发生。
+  bool probeShared = false;
+
+  /// Cookie 头里的 `pacmtoken` 与裸请求头用的是不是同一份；null = 没走到写回。
+  bool? credentialHeaderMatches;
+
+  void addNote(String value) {
+    if (value.isEmpty) return;
+    note = note.isEmpty ? value : '$note；$value';
+  }
+
+  SessionProbeRecord toRecord(SessionProbe verdict) => SessionProbeRecord(
+    at: at,
+    trigger: trigger,
+    verdict: verdict,
+    officialStatus: officialStatus,
+    officialCode: officialCode,
+    officialInfo: officialInfo,
+    rotationHeader: rotationHeader,
+    rotated: rotated,
+    expiryBefore: expiryBefore,
+    expiryFromResponse: expiryFromResponse,
+    expiryAfter: expiryAfter,
+    profileStatus: profileStatus,
+    profileCode: profileCode,
+    credentialBefore: credentialBefore,
+    credentialAfter: credentialAfter,
+    credentialSource: credentialSource,
+    probeShared: probeShared,
+    credentialHeaderMatches: credentialHeaderMatches,
+    note: note,
+  );
 }

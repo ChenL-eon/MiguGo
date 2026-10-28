@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/utils/credential_fingerprint.dart';
 import '../auth/web_login_cookies.dart';
 import 'secure_cookie_storage.dart';
 
@@ -15,14 +16,22 @@ import 'secure_cookie_storage.dart';
 /// - 登录保存下来的会话 Cookie 作为凭据：原生登录只落 `pacmtoken`，
 ///   通行证票据另存于 `PassportTicketStore`；官方页面登录可能带
 ///   `uid` / `msisdn` 与网页会话 id；
-/// - 服务端通过 Set-Cookie 下发的 Cookie 优先于手动快照，并处理
-///   Domain / Path / Secure / Max-Age / Expires 与删除语义；
-/// - 凭据保存在系统安全存储中，不写入日志或普通偏好设置。
+/// - **认证凭证（`pacmtoken` 与网页别名 `mg_auth_pacmtoken`）只有一个去处**：
+///   登录快照。三条写入通道（手动导入、`checkPacMtoken` 轮换、服务端
+///   Set-Cookie）都改同一份，别名始终与主名同值，因此请求头与裸
+///   `pacmtoken` 头不可能带出两份不同凭证；
+/// - 其余普通 Cookie 走 Cookie 罐，保留 Domain / Path / Secure /
+///   Max-Age / Expires 与删除语义，服务端下发的同名值优先于快照；
+/// - 普通 Cookie 的到期与删除**不影响认证凭证**：Cookie 过期和服务端撤销
+///   这份凭证是两件事，后者只由 `checkPacMtoken` 的回包判定；
+/// - 凭据保存在系统安全存储中，日志只出现指纹，不出现值。
 class MiguCookieStore {
-  MiguCookieStore({SecureCookieStorage? secureStorage, SharedPreferences? preferences})
-    : _secureStorage = secureStorage ?? FlutterSecureCookieStorage(),
-      // ignore: prefer_initializing_formals
-      _preferences = preferences;
+  MiguCookieStore({
+    SecureCookieStorage? secureStorage,
+    SharedPreferences? preferences,
+  }) : _secureStorage = secureStorage ?? FlutterSecureCookieStorage(),
+       // ignore: prefer_initializing_formals
+       _preferences = preferences;
 
   static final MiguCookieStore instance = MiguCookieStore();
 
@@ -36,6 +45,15 @@ class MiguCookieStore {
   static final RegExp _cookieName = RegExp(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$");
   static final Random _webSyncRandom = Random.secure();
 
+  /// 认证凭证的名称：主名与官方网页的历史别名，指向同一份会话。
+  ///
+  /// 它们只准落在登录快照里，绝不进 Cookie 罐——罐子会按 Max-Age / Expires
+  /// 清理条目，一旦被清掉，读凭据的地方就会悄悄退回没经重新验证的原始登录值。
+  static const Set<String> credentialCookieNames = {
+    'pacmtoken',
+    'mg_auth_pacmtoken',
+  };
+
   final SecureCookieStorage _secureStorage;
   final Map<String, String> _manualCookies = {};
   final Map<String, _JarCookie> _jar = {};
@@ -46,12 +64,38 @@ class MiguCookieStore {
   /// 只用于让被作废的登录确认“现在这份凭据还是不是我写的那份”。
   int _credentialRevision = 0;
 
-  /// 当前登录会话的网页同步代际。官方播放器 profile 里保存同一枚值，
-  /// 回收时只有对得上才允许写回，退出或换号后旧 profile 会被判定作废。
+  /// 当前凭证最近一次由哪条通道写入：`import`、`rotation`、`set-cookie`。
+  ///
+  /// 只是本机事实的描述，不能拿来比较服务端凭证新旧——咪咕不给版本号。
+  String _credentialSource = 'none';
+  DateTime? _credentialExpiresAt;
+  bool _credentialDurable = true;
+
+  /// 凭证改写计数：只进诊断记录，用来事后看某一次改写到底生没生效。
+  int _credentialRotationWrites = 0;
+  int _credentialCookieWrites = 0;
+  int _credentialWriteRejections = 0;
+  int _credentialDeleteIgnored = 0;
+  int _credentialHarvestSkips = 0;
+
+  /// 当前登录会话的代际标记，同时用作官方播放器 profile 的同步哨兵。
+  ///
+  /// 每次换号、重新导入、退出都换新值，未登录时为 null：官方播放器 profile
+  /// 里保存同一枚值，回收时对不上就一律不写回；在途的轮换结果同理，代际变了
+  /// 就不准再改当前凭据。它只区分「本机哪一次登录」，不代表服务端凭证新旧。
   String? _webSyncToken;
 
   /// 退出意图是否尚未落实：为真时启动先清理旧凭据，绝不直接采用它们。
   bool _logoutIntentPending = false;
+
+  /// 恢复过程中从旧版罐子记录里发现的认证凭证，只用来在升级时接回快照。
+  _JarCookie? _storedCredential;
+
+  /// 这次恢复是否把旧记录重写了：需要把清掉凭证的罐子重新落盘。
+  bool _migrationNeededJarRewrite = false;
+
+  /// 凭据本轮只来自旧版明文（迁移或读取失败后的临时兜底），磁盘上还没有安全存储的那份。
+  bool _legacyFallback = false;
 
   SharedPreferences? _preferences;
   bool _initialized = false;
@@ -59,12 +103,12 @@ class MiguCookieStore {
 
   bool get hasImportedLogin => _manualCookies.isNotEmpty;
 
-  /// 当前登录会话的网页同步代际；未登录时为 null。
+  /// 当前登录会话的代际标记；未登录时为 null。定向改写凭据时要带上它。
   String? get webSyncToken => _webSyncToken;
 
   int get importedCookieCount => _manualCookies.length;
 
-  /// 本地是否保存了咪咕音乐网页登录会话 Cookie（`mg_auth_sid` 等）。
+  /// 本机是否保存了咪咕音乐网页登录会话 Cookie（`mg_auth_sid` 等）。
   ///
   /// 只有通行证或浏览器统计类 Cookie 时，VIP 播放一定拿不到链接；
   /// 界面与错误提示需要区分“没登录”和“登录了但凭证不完整”。
@@ -80,12 +124,70 @@ class MiguCookieStore {
 
   /// 播放接口需要的账号凭据，按官方同名请求头发送。
   ///
-  /// 服务端会轮换 `pacmtoken`，因此 Cookie 罐里的值优先于手动导入的快照。
+  /// `pacmtoken` 只来自登录快照这一个源头；`uid` / `msisdn` 仍允许服务端
+  /// 下发的同名 Cookie 优先，见 [_firstCookieValue]。
   ({String? uid, String? pacmtoken, String? msisdn}) get credentials => (
     uid: _firstCookieValue(const ['mg_auth_uid', 'uid']),
-    pacmtoken: _firstCookieValue(const ['mg_auth_pacmtoken', 'pacmtoken']),
+    pacmtoken: _currentPacmtoken(),
     msisdn: _firstCookieValue(const ['mg_auth_msisdn', 'msisdn']),
   );
+
+  /// 服务端最近一次给认证凭证附带的过期时间，仅供诊断观察。
+  ///
+  /// 它**不参与**凭据取舍与清理：Cookie 到期与服务端撤销这份凭据是两件事，
+  /// 后者的唯一判据是 `checkPacMtoken` 的回包。只暴露时间，不暴露值。
+  DateTime? get credentialExpiresAt => _credentialExpiresAt;
+
+  /// 当前凭据最近一次由哪条通道写入。
+  ///
+  /// `import`（网页/手动导入）、`native-login`（原生登录写入）、`rotation`
+  /// （`checkPacMtoken` 轮换写回）、`set-cookie`（服务端下发）、`restored`
+  /// （本次启动从安全存储读回）、`migrated`（从旧版罐子记录接回）、`none`（未登录）。
+  String get credentialSource => _credentialSource;
+
+  /// 当前凭据的指纹（不含原文），用来在日志里比对“这次用的到底是哪一份”。
+  String get credentialFingerprint =>
+      credentialFingerprintOf(credentials.pacmtoken);
+
+  /// 内存里的凭据是否已确认写进安全存储。
+  ///
+  /// 安全存储不可用时凭据只在本次运行内有效；这个值用来避免把“内存已更新”
+  /// 说成“磁盘上一致”。
+  bool get credentialStateIsDurable => _credentialDurable;
+
+  /// 本次运行内各类凭据改写计数，只含数量，不含值。
+  ({
+    int rotationWrites,
+    int cookieWrites,
+    int rejections,
+    int deleteIgnored,
+    int harvestSkips,
+  })
+  get credentialWriteStats => (
+    rotationWrites: _credentialRotationWrites,
+    cookieWrites: _credentialCookieWrites,
+    rejections: _credentialWriteRejections,
+    deleteIgnored: _credentialDeleteIgnored,
+    harvestSkips: _credentialHarvestSkips,
+  );
+
+  /// 发给该地址的 Cookie 头里，认证凭证是否就是 [credentials] 里那一份。
+  ///
+  /// Cookie 作用域（Domain / Path）与裸请求头是两套投递路径，这里给传输
+  /// 一致性一个可断言的出口：返回 false 说明同一个请求会带出两份不同凭证。
+  bool credentialHeaderMatches(Uri uri) {
+    final token = credentials.pacmtoken;
+    if (token == null) return true;
+    final header = cookieHeaderFor(uri);
+    if (header == null) return false;
+    for (final pair in header.split(';')) {
+      final separator = pair.indexOf('=');
+      if (separator <= 0) continue;
+      if (pair.substring(0, separator).trim() != 'pacmtoken') continue;
+      return pair.substring(separator + 1).trim() == token;
+    }
+    return false;
+  }
 
   /// 安全存储不可用或迁移失败时的说明；界面需要明确告知用户。
   String? get storageWarning => _storageWarning;
@@ -99,8 +201,9 @@ class MiguCookieStore {
 
   /// 返回可发送给目标地址的 Cookie 请求头，非咪咕域名一律不附加。
   ///
-  /// 服务端下发的当前值优先；手动快照在服务端没有可用同名字段时兜底，
-  /// 因此服务端轮换会覆盖旧值，而一次删除不会让登录凭据从此不再发送。
+  /// 普通 Cookie 里服务端下发的当前值优先，手动快照只在服务端没有可用同名字段
+  /// 时兜底，因此一次删除不会让某个 Cookie 从此不再发送。认证凭证不在罐子里，
+  /// 恒等于 [credentials] 的那一份，与裸 `pacmtoken` 请求头不可能对不上。
   String? cookieHeaderFor(Uri uri) {
     if (!isMiguHost(uri.host)) return null;
 
@@ -148,19 +251,8 @@ class MiguCookieStore {
   Future<int> importLoginCookies(String raw) async {
     final parsed = _parseCookieHeader(raw);
 
-    _manualCookies
-      ..clear()
-      ..addAll(parsed);
-    _jar.clear();
-    _serverManaged.clear();
-    _credentialRevision++;
-    _startWebSyncSession();
-
-    await _enqueuePersist(() async {
-      final manualSaved = await _persistManualCookies();
-      final jarSaved = await _persistJar();
-      if (manualSaved && jarSaved) await _releaseLogoutIntent();
-    });
+    _replaceLoginSnapshot(parsed, source: 'import');
+    await _enqueuePersist(_persistLoginReplacement);
     return _manualCookies.length;
   }
 
@@ -170,25 +262,40 @@ class MiguCookieStore {
   /// `pacmtoken`，否则两个账号的凭据会同时发出去。
   ///
   /// 快照用于调用方在登录被作废后按条件撤回：只有当前凭据仍是这一份时才清除。
-  Future<({Map<String, String> snapshot, int revision})> applyNativeLoginSession(
-    Map<String, String> cookies,
-  ) async {
+  Future<({Map<String, String> snapshot, int revision})>
+  applyNativeLoginSession(Map<String, String> cookies) async {
     final clean = _normalizeLoginCookies(cookies);
 
+    _replaceLoginSnapshot(clean, source: 'native-login');
+    final snapshot = loginSnapshot;
+    final revision = _credentialRevision;
+    await _enqueuePersist(_persistLoginReplacement);
+    return (
+      snapshot: snapshot,
+      revision: revision,
+    );
+  }
+
+  /// 整体换成一份新的登录快照：旧凭据、旧服务端会话与旧代际一起作废。
+  void _replaceLoginSnapshot(Map<String, String> cookies, {required String source}) {
     _manualCookies
       ..clear()
-      ..addAll(clean);
+      ..addAll(cookies);
+    _normalizeCredentialAliases(_manualCookies);
     _jar.clear();
     _serverManaged.clear();
-    final revision = ++_credentialRevision;
+    _credentialRevision++;
+    _credentialSource = source;
+    _credentialExpiresAt = null;
     _startWebSyncSession();
+  }
 
-    await _enqueuePersist(() async {
-      final manualSaved = await _persistManualCookies();
-      final jarSaved = await _persistJar();
-      if (manualSaved && jarSaved) await _releaseLogoutIntent();
-    });
-    return (snapshot: Map<String, String>.unmodifiable(clean), revision: revision);
+  /// 整份替换后的落盘：磁盘没跟上时如实记下，不声称内存与持久化一致。
+  Future<void> _persistLoginReplacement() async {
+    final manualSaved = await _persistManualCookies();
+    final jarSaved = await _persistJar();
+    _credentialDurable = manualSaved && jarSaved;
+    if (manualSaved && jarSaved) await _releaseLogoutIntent();
   }
 
   /// 手动快照的原样副本，供内嵌官方播放器沿用同一会话。
@@ -201,15 +308,22 @@ class MiguCookieStore {
   /// 删除前先把退出意图写进安全存储：即使旧凭据这次删不掉，重启也不能把它们
   /// 当成登录状态读回来。
   Future<void> clearLoginCookies() async {
+    _clearLoginStateInMemory();
+    await _enqueuePersist(() async {
+      _credentialDurable = await _persistLogout();
+    });
+  }
+
+  /// 退出与作废撤回共用的内存清理：凭据、服务端会话、代际一起归零。
+  void _clearLoginStateInMemory() {
     _manualCookies.clear();
     _jar.clear();
     _serverManaged.clear();
     _logoutIntentPending = true;
     _credentialRevision++;
     _webSyncToken = null;
-    await _enqueuePersist(() async {
-      await _persistLogout();
-    });
+    _credentialSource = 'none';
+    _credentialExpiresAt = null;
   }
 
   /// 仅当当前凭据仍是 [snapshot]（且修订号未变）时清除，返回撤回落盘是否完成。
@@ -225,34 +339,53 @@ class MiguCookieStore {
     required Map<String, String> snapshot,
     required int revision,
   }) {
-    if (revision != _credentialRevision || !mapEquals(_manualCookies, snapshot)) {
+    if (revision != _credentialRevision ||
+        !mapEquals(_manualCookies, snapshot)) {
       return Future<bool>.value(false);
     }
-    _manualCookies.clear();
-    _jar.clear();
-    _serverManaged.clear();
+    _clearLoginStateInMemory();
     // 先记下退出意图：新登录的落盘排在这次清理后面，由它接管或清除标记。
-    _logoutIntentPending = true;
-    _credentialRevision++;
-    _webSyncToken = null;
     var durable = false;
     return _enqueuePersist(() async {
       durable = await _persistLogout(staleCleanup: true);
+      _credentialDurable = durable;
     }).then((_) => durable);
   }
 
   /// 用续期换到的新凭据覆盖同名值，其余 Cookie 保持原样。
   ///
-  /// 罐子里服务端轮换留下的同名旧值必须一起作废，否则它仍会优先于新快照
-  /// 发出去；官方播放器同步来的 `mg_auth_sid` 等与会话无关的条目不受影响。
-  Future<int> applyRenewedCredentials(Map<String, String> cookies) async {
+  /// 认证凭证（`pacmtoken` / `mg_auth_pacmtoken`）写进唯一的登录快照，别名与
+  /// 主名成对更新；罐子里若还留着旧版本存的同名条目，一并丢掉，否则它会继续
+  /// 压住新值发出去。
+  ///
+  /// [loginGeneration] 是发起这次续期时的登录代际（当时的 [webSyncToken]）。
+  /// 传了就必须与当前代际一致：期间用户退出或换了账号，这份结果属于上一次会话，
+  /// 一律不准改写当前凭据。
+  Future<int> applyRenewedCredentials(
+    Map<String, String> cookies, {
+    String? loginGeneration,
+  }) async {
     if (!_initialized) return 0;
+    if (!_acceptsCredentialWrite(loginGeneration)) {
+      _credentialWriteRejections++;
+      return 0;
+    }
     var changed = 0;
     cookies.forEach((name, value) {
       final cookieName = name.trim();
       final cookieValue = value.trim();
       if (cookieName.isEmpty || cookieValue.isEmpty) return;
       if (!_cookieName.hasMatch(cookieName)) return;
+      if (credentialCookieNames.contains(cookieName)) {
+        final wrote = _writeCredential(cookieValue, source: 'rotation');
+        if (wrote > 0) {
+          _credentialRotationWrites++;
+          changed += wrote;
+        }
+        // 轮换结果本身就是当前凭据，罐子里不该再留任何同名副本。
+        _jar.removeWhere((_, cookie) => credentialCookieNames.contains(cookie.name));
+        return;
+      }
       if (_manualCookies[cookieName] != cookieValue) {
         _manualCookies[cookieName] = cookieValue;
         changed++;
@@ -264,8 +397,9 @@ class MiguCookieStore {
     if (changed > 0) {
       _credentialRevision++;
       await _enqueuePersist(() async {
-        await _persistManualCookies();
-        await _persistJar();
+        final manualSaved = await _persistManualCookies();
+        final jarSaved = await _persistJar();
+        _credentialDurable = manualSaved && jarSaved;
       });
     }
     return changed;
@@ -278,17 +412,27 @@ class MiguCookieStore {
   ///
   /// [webSyncToken] 必须是当前登录会话的代际：官方播放器 profile 可能还带着
   /// 退出前或上一个账号的 Cookie，代际对不上时一律不写，不能让旧会话复活。
+  ///
+  /// 认证凭证**不走这条通道**：profile 里读到的 `pacmtoken` 分不清是刚续签的
+  /// 还是退出前残留的，咪咕又不给版本信息，按到达顺序覆盖就可能把官方校验接口
+  /// 刚刚确认过的新值换回旧值。凭证只由轮换与服务端 Set-Cookie 两条通道更新。
   Future<int> refreshLoginCookies(
     Map<String, String> updates, {
     String? webSyncToken,
   }) async {
     if (!_initialized) return 0;
-    if (webSyncToken == null || webSyncToken != _webSyncToken || !hasImportedLogin) {
+    if (webSyncToken == null ||
+        webSyncToken != _webSyncToken ||
+        !hasImportedLogin) {
       return 0;
     }
     var changed = 0;
     updates.forEach((name, value) {
       if (value.isEmpty) return;
+      if (credentialCookieNames.contains(name)) {
+        _credentialHarvestSkips++;
+        return;
+      }
       final known = _manualCookies.containsKey(name);
       if (!known && !WebLoginCookieSet.looksLikeAuthCookieName(name)) return;
       if (_manualCookies[name] == value) return;
@@ -297,12 +441,18 @@ class MiguCookieStore {
     });
     if (changed > 0) {
       _credentialRevision++;
-      await _enqueuePersist(_persistManualCookies);
+      await _enqueuePersist(() async {
+        _credentialDurable = await _persistManualCookies();
+      });
     }
     return changed;
   }
 
   /// 记录服务端下发的 Cookie，并按标准语义更新本地会话。
+  ///
+  /// 认证凭证与普通 Cookie 分两条路：凭证直接落到登录快照（不进罐，因此不受
+  /// Max-Age / Expires 清理），普通 Cookie 保持原有的 Domain / Path / Secure
+  /// 与删除语义。
   Future<void> capture(Response<dynamic> response) async {
     if (!_initialized) return;
 
@@ -312,11 +462,18 @@ class MiguCookieStore {
     final uri = response.requestOptions.uri;
     if (!isMiguHost(uri.host)) return;
 
-    var changed = false;
+    var jarChanged = false;
+    var credentialChanged = false;
     for (final header in values) {
       for (final part in _splitCombinedSetCookie(header)) {
         final parsed = _parseSetCookie(part, uri);
         if (parsed == null) continue;
+
+        if (credentialCookieNames.contains(parsed.name)) {
+          credentialChanged =
+              _applyCredentialSetCookie(parsed) || credentialChanged;
+          continue;
+        }
 
         final managed = _ManagedName(
           domain: parsed.domain,
@@ -330,11 +487,82 @@ class MiguCookieStore {
         } else {
           _jar[parsed.key] = parsed.cookie!;
         }
-        changed = true;
+        jarChanged = true;
       }
     }
 
-    if (changed) await _enqueuePersist(_persistJar);
+    if (credentialChanged) _credentialRevision++;
+    if (jarChanged || credentialChanged) {
+      await _enqueuePersist(() async {
+        if (jarChanged) await _persistJar();
+        if (credentialChanged) {
+          _credentialDurable = await _persistManualCookies();
+        }
+      });
+    }
+  }
+
+  /// 服务端下发的认证凭证写进快照；删除语义在这里刻意不生效。
+  ///
+  /// `Max-Age=0` 或已过期的 `Expires` 说的是这条 Cookie 在本机该存多久，不等于
+  /// 服务端撤销了这份凭据——真撤销只有 `checkPacMtoken` 的回包说得准。把它当成
+  /// 删除，本机就会悄悄改用另一份未经重新验证的凭据，表现为一会儿能用一会儿
+  /// 「请先登录」。历史版本正是把凭证留在罐子里，被清理后退回旧快照。
+  bool _applyCredentialSetCookie(_ParsedSetCookie parsed) {
+    if (!_acceptsCredentialWrite(null)) {
+      _credentialWriteRejections++;
+      return false;
+    }
+    if (parsed.deleted) {
+      _credentialDeleteIgnored++;
+      return false;
+    }
+    final cookie = parsed.cookie;
+    final changed = _writeCredential(
+      cookie?.value ?? '',
+      source: 'set-cookie',
+      expiresAt: cookie?.expiresAt,
+    );
+    if (changed > 0) _credentialCookieWrites++;
+    return changed > 0;
+  }
+
+  /// 把一份认证凭证写进它唯一的落点：主名，以及本来就在用的网页别名。
+  ///
+  /// 别名只在快照里本来就有这个名字时跟着更新——原生登录不带别名，凭空写一份
+  /// 只会多出一个没人用的凭据副本。[expiresAt] 每次按服务端这一轮给的信息记录，
+  /// 仅用于诊断，不参与凭据取舍。返回实际改动的条数。
+  int _writeCredential(
+    String value, {
+    required String source,
+    DateTime? expiresAt,
+  }) {
+    final token = value.trim();
+    if (token.isEmpty) return 0;
+    var changed = 0;
+    if (_manualCookies['pacmtoken'] != token) {
+      _manualCookies['pacmtoken'] = token;
+      changed++;
+    }
+    if (_manualCookies.containsKey('mg_auth_pacmtoken') &&
+        _manualCookies['mg_auth_pacmtoken'] != token) {
+      _manualCookies['mg_auth_pacmtoken'] = token;
+      changed++;
+    }
+    _credentialExpiresAt = expiresAt;
+    if (changed > 0) _credentialSource = source;
+    return changed;
+  }
+
+  /// 这次改写还轮得到当前这次登录吗。
+  ///
+  /// 只回答本机事实：没登录、正在退出、或代际已换（退出后重新登录、换号），
+  /// 都属于上一次会话的结果，不准改写现在的凭据。它判断不了服务端凭证新旧，
+  /// 咪咕没有提供可比对的版本信息。
+  bool _acceptsCredentialWrite(String? loginGeneration) {
+    if (!hasImportedLogin || _logoutIntentPending) return false;
+    if (loginGeneration != null && loginGeneration != _webSyncToken) return false;
+    return true;
   }
 
   Future<void> _restoreSecureState() async {
@@ -393,8 +621,22 @@ class MiguCookieStore {
       label: '会话 Cookie',
     );
 
-    _restoreManualCookies(manualRaw);
+    final manualNormalized = _restoreManualCookies(manualRaw);
     _restoreJar(jarRaw);
+    final rewriteJar = _migrationNeededJarRewrite;
+    _credentialDurable = !_legacyFallback && !manualNormalized && !rewriteJar;
+    if (hasImportedLogin && _credentialSource == 'none') {
+      _credentialSource = credentials.pacmtoken == null ? 'none' : 'restored';
+    }
+    if (manualNormalized || rewriteJar) {
+      // 快照归一化或旧罐子凭证迁移后，确认重写成功才算持久化一致。
+      _migrationNeededJarRewrite = false;
+      await _enqueuePersist(() async {
+        final manualSaved = await _persistManualCookies();
+        final jarSaved = !rewriteJar || await _persistJar();
+        _credentialDurable = !_legacyFallback && manualSaved && jarSaved;
+      });
+    }
     if (hasImportedLogin) {
       _startWebSyncSession();
     } else {
@@ -429,8 +671,11 @@ class MiguCookieStore {
       '系统安全存储不可用，登录信息本次运行结束后不会保留。'
       '本次仅临时读取旧版明文记录，未写回明文。',
     );
+    _legacyFallback = true;
+    _credentialDurable = false;
     _restoreLegacyIntoMemory();
     if (hasImportedLogin) {
+      _credentialSource = credentials.pacmtoken == null ? 'none' : 'restored';
       _startWebSyncSession();
     }
   }
@@ -464,6 +709,7 @@ class MiguCookieStore {
       // 迁移失败时保留旧数据，并明确提示，不做静默明文回退。
     }
 
+    _legacyFallback = true;
     _setStorageWarning(
       '旧版$label已读取，但迁移到系统安全存储失败；旧数据仍保留，'
       '本次运行可继续使用，后续会再次尝试迁移。',
@@ -476,22 +722,27 @@ class MiguCookieStore {
     _restoreJar(_preferences?.getString(_legacyCookieJarKey));
   }
 
-  void _restoreManualCookies(String? raw) {
-    if (raw == null || raw.isEmpty) return;
+  bool _restoreManualCookies(String? raw) {
+    if (raw == null || raw.isEmpty) return false;
     try {
       final data = jsonDecode(raw);
       if (data is Map) {
+        final restored = <String, String>{};
         data.forEach((key, value) {
           final name = key.toString();
-          final cookieValue = value?.toString() ?? '';
-          if (_cookieName.hasMatch(name) && cookieValue.isNotEmpty) {
-            _manualCookies[name] = cookieValue;
+          if (_cookieName.hasMatch(name)) {
+            restored[name] = value?.toString() ?? '';
           }
         });
+        final normalized = _normalizeCredentialAliases(restored);
+        restored.removeWhere((_, value) => value.isEmpty);
+        _manualCookies.addAll(restored);
+        return normalized;
       }
     } catch (_) {
       debugPrint('本地登录 Cookie 记录无法解析，已忽略。');
     }
+    return false;
   }
 
   void _restoreJar(String? raw) {
@@ -499,10 +750,10 @@ class MiguCookieStore {
     try {
       final data = jsonDecode(raw);
       if (data is List) {
-        _restoreLegacyJar(data);
+        _restoreStoredJarEntries(data);
       } else if (data is Map) {
         final cookies = data['cookies'];
-        if (cookies is List) _restoreLegacyJar(cookies);
+        if (cookies is List) _restoreStoredJarEntries(cookies);
         final managed = data['managed'];
         if (managed is List) {
           for (final item in managed) {
@@ -517,16 +768,46 @@ class MiguCookieStore {
     } catch (_) {
       debugPrint('本地会话 Cookie 记录无法解析，已忽略。');
     }
+    // 认证凭证不再有罐子里的位置：接管过的名称一并丢掉，免得它继续压住快照。
+    _serverManaged.removeWhere(
+      (_, managed) => credentialCookieNames.contains(managed.name),
+    );
+    _adoptStoredCredential();
   }
 
-  void _restoreLegacyJar(List<dynamic> data) {
+  void _restoreStoredJarEntries(List<dynamic> data) {
     for (final item in data) {
       final map = item is Map ? item : null;
       if (map == null) continue;
       final cookie = _JarCookie.fromJson(map);
       if (cookie == null) continue;
+      if (credentialCookieNames.contains(cookie.name)) {
+        // 不管接不接，罐子里都不该再留凭证副本；标记一次，让磁盘按新状态重写。
+        _migrationNeededJarRewrite = true;
+        _noteStoredCredential(cookie);
+        continue;
+      }
       _jar[cookie.key] = cookie;
     }
+  }
+
+  /// 旧版本可能把认证凭证存进了 Cookie 罐，这里接回快照。
+  ///
+  /// 沿用旧读法的遍历口径：第一条未过期的同名条目胜出，过期的不接（接了就是把
+  /// 一份服务端未必还认的凭据重新用起来）。升级前后发出去的因此是同一份值，
+  /// 差别只在此之后罐子里不再留凭证副本。
+  void _noteStoredCredential(_JarCookie cookie) {
+    if (_storedCredential != null) return;
+    final expiresAt = cookie.expiresAt;
+    if (expiresAt != null && expiresAt.isBefore(DateTime.now())) return;
+    _storedCredential = cookie;
+  }
+
+  void _adoptStoredCredential() {
+    final stored = _storedCredential;
+    _storedCredential = null;
+    if (stored == null) return;
+    _writeCredential(stored.value, source: 'migrated', expiresAt: stored.expiresAt);
   }
 
   Map<String, String> _parseCookieHeader(String raw) {
@@ -545,7 +826,9 @@ class MiguCookieStore {
       if (pair.isEmpty) continue;
       final separator = pair.indexOf('=');
       if (separator <= 0) {
-        throw const FormatException('Cookie 格式不正确，应类似 name=value; name2=value2');
+        throw const FormatException(
+          'Cookie 格式不正确，应类似 name=value; name2=value2',
+        );
       }
       final name = pair.substring(0, separator).trim();
       final value = pair.substring(separator + 1).trim();
@@ -596,11 +879,16 @@ class MiguCookieStore {
       final trimmed = segment.trim();
       if (trimmed.isEmpty) continue;
       final eq = trimmed.indexOf('=');
-      final key = (eq >= 0 ? trimmed.substring(0, eq) : trimmed).trim().toLowerCase();
+      final key = (eq >= 0 ? trimmed.substring(0, eq) : trimmed)
+          .trim()
+          .toLowerCase();
       final attrValue = eq >= 0 ? trimmed.substring(eq + 1).trim() : '';
 
       if (key == 'domain') {
-        final candidate = attrValue.toLowerCase().replaceFirst(RegExp(r'^\.'), '');
+        final candidate = attrValue.toLowerCase().replaceFirst(
+          RegExp(r'^\.'),
+          '',
+        );
         if (candidate.isEmpty) continue;
         if (!isMiguHost(candidate) ||
             !_hostMatchesDomain(uri.host, candidate, hostOnly: false)) {
@@ -654,11 +942,16 @@ class MiguCookieStore {
     );
   }
 
+  /// 按 Cookie 标准语义清掉罐子里已到期的普通 Cookie。
+  ///
+  /// 认证凭证不在罐子里，因此这一步碰不到它：`expires`/`Max-Age` 到期不等于
+  /// 服务端撤销，后者的判据只有 `checkPacMtoken` 的回包。
   bool _purgeExpired() {
     final now = DateTime.now();
     final before = _jar.length;
     _jar.removeWhere(
-      (_, cookie) => cookie.expiresAt != null && cookie.expiresAt!.isBefore(now),
+      (_, cookie) =>
+          cookie.expiresAt != null && cookie.expiresAt!.isBefore(now),
     );
     return _jar.length != before;
   }
@@ -691,6 +984,31 @@ class MiguCookieStore {
     return null;
   }
 
+  /// 当前认证凭证只看登录快照：非空主名优先，别名兜底；Cookie 罐不参与。
+  String? _currentPacmtoken() {
+    final main = _manualCookies['pacmtoken'];
+    if (main != null && main.isNotEmpty) return main;
+    final alias = _manualCookies['mg_auth_pacmtoken'];
+    if (alias != null && alias.isNotEmpty) return alias;
+    return null;
+  }
+
+  /// 非空主名优先，否则接回别名；只同步已有别名，不推断凭据新旧。
+  bool _normalizeCredentialAliases(Map<String, String> cookies) {
+    final main = cookies['pacmtoken']?.trim() ?? '';
+    final alias = cookies['mg_auth_pacmtoken']?.trim() ?? '';
+    final token = main.isNotEmpty ? main : alias;
+    if (token.isEmpty) return false;
+
+    var changed = cookies['pacmtoken'] != token;
+    cookies['pacmtoken'] = token;
+    if (cookies.containsKey('mg_auth_pacmtoken')) {
+      changed = cookies['mg_auth_pacmtoken'] != token || changed;
+      cookies['mg_auth_pacmtoken'] = token;
+    }
+    return changed;
+  }
+
   void _scheduleJarPersist() {
     unawaited(_enqueuePersist(_persistJar));
   }
@@ -698,7 +1016,9 @@ class MiguCookieStore {
   void _startWebSyncSession() {
     final buffer = StringBuffer();
     for (var i = 0; i < 16; i++) {
-      buffer.write(_webSyncRandom.nextInt(256).toRadixString(16).padLeft(2, '0'));
+      buffer.write(
+        _webSyncRandom.nextInt(256).toRadixString(16).padLeft(2, '0'),
+      );
     }
     _webSyncToken = buffer.toString();
   }
@@ -714,7 +1034,7 @@ class MiguCookieStore {
     cookies.forEach((name, value) {
       final cookieName = name.trim();
       final cookieValue = value.trim();
-      if (cookieValue.isEmpty) return;
+      if (cookieValue.isEmpty && !credentialCookieNames.contains(cookieName)) return;
       if (!_cookieName.hasMatch(cookieName)) {
         throw const FormatException('登录凭据名称不合法。');
       }
@@ -725,6 +1045,8 @@ class MiguCookieStore {
       }
       clean[cookieName] = cookieValue;
     });
+    _normalizeCredentialAliases(clean);
+    clean.removeWhere((_, value) => value.isEmpty);
     if (clean.isEmpty) {
       throw const FormatException('登录结果里没有可用的凭据。');
     }
@@ -736,7 +1058,10 @@ class MiguCookieStore {
   /// 返回 true 只代表退出意图与两份凭据都已在磁盘上处理干净；
   /// 任何一步失败都保持意图并返回 false，绝不把“内存已清空”当成“磁盘已撤回”。
   Future<bool> _persistLogout({bool staleCleanup = false}) async {
-    final markerWritten = await _tryWriteSecure(_logoutMarkerKey, _logoutMarkerPending);
+    final markerWritten = await _tryWriteSecure(
+      _logoutMarkerKey,
+      _logoutMarkerPending,
+    );
     final credentialsRemoved = await _deleteStoredCredentials();
     final markerRemoved =
         credentialsRemoved && await _tryDeleteSecure(_logoutMarkerKey);
@@ -848,7 +1173,9 @@ class MiguCookieStore {
     final payload = jsonEncode({
       'version': 2,
       'cookies': _jar.values.map((cookie) => cookie.toJson()).toList(),
-      'managed': _serverManaged.values.map((managed) => managed.toJson()).toList(),
+      'managed': _serverManaged.values
+          .map((managed) => managed.toJson())
+          .toList(),
     });
     return _writeSecure(_secureCookieJarKey, payload);
   }
@@ -920,7 +1247,8 @@ class _JarCookie {
 
   String get key => '${domain.toLowerCase()}|$path|$name';
 
-  bool matchesHost(String host) => _hostMatchesDomain(host, domain, hostOnly: hostOnly);
+  bool matchesHost(String host) =>
+      _hostMatchesDomain(host, domain, hostOnly: hostOnly);
 
   Map<String, dynamic> toJson() => {
     'name': name,
@@ -968,7 +1296,8 @@ class _ManagedName {
 
   String get key => '${domain.toLowerCase()}|$hostOnly|$name';
 
-  bool matchesHost(String host) => _hostMatchesDomain(host, domain, hostOnly: hostOnly);
+  bool matchesHost(String host) =>
+      _hostMatchesDomain(host, domain, hostOnly: hostOnly);
 
   Map<String, dynamic> toJson() => {
     'domain': domain,

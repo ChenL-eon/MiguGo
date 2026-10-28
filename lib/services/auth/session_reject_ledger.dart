@@ -80,6 +80,7 @@ class SessionRejectLedger {
     SharedPreferences? prefs,
     DateTime Function()? clock,
     this.confirmGap = const Duration(minutes: 30),
+    this.strikeWindow = const Duration(hours: 24),
   }) : _preferences = prefs,
        _clock = clock ?? DateTime.now;
 
@@ -98,6 +99,13 @@ class SessionRejectLedger {
   /// 一次登录后的批量请求里，多个接口会同时因为同一个原因被拒，那是一波失败，
   /// 不是两次独立取证；只有隔了一阵之后再次被拒，才说明这份凭据确实不被接受。
   final Duration confirmGap;
+
+  /// 两次拒绝最多隔这么久仍算同一次判定。
+  ///
+  /// 计数会跨重启保留；若没有上限，几周前的一次拒绝会和新启动时的第一次拒绝
+  /// 凑成“两次独立取证”，表现为刚打开应用就被自动退出。超过这个窗口的旧账
+  /// 一律作废，新的第一次拒绝只降级状态、保留凭据。
+  final Duration strikeWindow;
 
   SessionRejectRecord? _last;
   SessionRejectRecord? _lastAccount;
@@ -119,7 +127,17 @@ class SessionRejectLedger {
     _last = _readRecord(_recordKey);
     _lastAccount = _readRecord(_accountRecordKey);
     _strikes = _preferences!.getInt(_strikesKey) ?? 0;
-    _lastStrikeAt = DateTime.tryParse(_preferences!.getString(_strikeAtKey) ?? '');
+    final loadedAt = DateTime.tryParse(
+      _preferences!.getString(_strikeAtKey) ?? '',
+    );
+    if (loadedAt != null && _clock().difference(loadedAt) > strikeWindow) {
+      // 上次的拒绝已经太久远，不能拿来和这次启动凑成两次取证。
+      _strikes = 0;
+      _lastStrikeAt = null;
+      unawaited(_persistStrikes());
+    } else {
+      _lastStrikeAt = loadedAt;
+    }
   }
 
   SessionRejectRecord? _readRecord(String key) {
@@ -161,7 +179,13 @@ class SessionRejectLedger {
     if (!loginScoped) return _strikes;
     _lastAccount = record;
     unawaited(_persistRecord(record, _accountRecordKey));
-    final previous = _lastStrikeAt;
+    var previous = _lastStrikeAt;
+    if (previous != null && now.difference(previous) > strikeWindow) {
+      _strikes = 0;
+      _lastStrikeAt = null;
+      previous = null;
+      unawaited(_persistStrikes());
+    }
     if (previous != null && now.difference(previous) < confirmGap) {
       return _strikes;
     }
@@ -193,7 +217,6 @@ class SessionRejectLedger {
   }
 
   /// 服务端文案有可能夹带请求内容本身，因此入库前先过滤再截断。
-  @visibleForTesting
   static String sanitizeInfo(String raw) {
     final trimmed = raw.trim();
     if (trimmed.isEmpty) return '';

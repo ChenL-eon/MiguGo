@@ -5,26 +5,32 @@ import 'package:flutter/widgets.dart';
 
 import 'session_probe.dart';
 
-/// 前台保活：应用可见时每 4–6 小时探一次登录态，尽早发现“会话已被咪咕吊销”。
+/// 前台保活：应用可见时每 45–75 分钟探一次登录态，尽早发现“会话已被咪咕吊销”。
 ///
-/// 咪咕不发 refresh token，这里只做只读探测：探测到失效就把结论交给上层——
-/// 账号层会先用原生登录留下的票据试一次静默续期，续不到才提示重新登录。
-/// 本类自身不续期、不自动重登。
-/// 定时器只在有登录凭据时才挂载，退到后台立即取消，回到前台重新排期。
+/// 探测走 `MiguMusicApi.checkSessionAlive`：官方校验接口成功时可能下发新的
+/// `pacmtoken`，应用会写回本机；它是否真的延长服务端有效期仍需真机验证。
+/// 探测到失效才把结论交给上层，
+/// 由账号层做两步判定；本类自身不续期、不自动重登。
+/// 定时器只在有登录凭据时才挂载，退到后台暂停，回到前台恢复原定截止时间；
+/// [allowsBackground] 置真时（桌面端隐藏到托盘）前后台一律继续排期。
 class SessionKeepAlive with WidgetsBindingObserver {
   SessionKeepAlive({
     required this.probe,
     this.onAlive,
     this.onRevoked,
     this.sessionEpoch,
-    Duration minInterval = const Duration(hours: 4),
-    Duration maxInterval = const Duration(hours: 6),
+    Duration minInterval = const Duration(minutes: 45),
+    Duration maxInterval = const Duration(minutes: 75),
     Random? random,
+    DateTime Function()? clock,
   }) : _min = minInterval,
        _max = maxInterval < minInterval ? minInterval : maxInterval,
-       _random = random ?? Random.secure();
+       _random = random ?? Random.secure(),
+       _clock = clock ?? DateTime.now;
 
-  /// 一次只读探测；生产环境传 `MiguMusicApi.checkSessionAlive`。
+  /// 一次登录态探测；生产环境传 `MiguMusicApi.checkSessionAlive`。
+  ///
+  /// 探测本身可能顺带写回官方轮换的 `pacmtoken`，但不会替用户重新登录。
   final Future<SessionProbe> Function() probe;
 
   /// 探测到凭据仍可用，用于刷新“最近一次校验时间”。
@@ -39,15 +45,28 @@ class SessionKeepAlive with WidgetsBindingObserver {
   final Duration _min;
   final Duration _max;
   final Random _random;
+  final DateTime Function() _clock;
 
   Timer? _timer;
+  DateTime? _nextProbeAt;
+  int _scheduleGeneration = 0;
   bool _armed = false;
   bool _foreground = true;
+  bool _allowsBackground = false;
   bool _probing = false;
   bool _observing = false;
 
   /// 是否已排上队（登录后为 true，失效或登出后为 false）。
   bool get isArmed => _armed;
+
+  /// 离开前台后是否继续保活。桌面端「关闭主窗口后常驻托盘」开启时由上层置真。
+  bool get allowsBackground => _allowsBackground;
+
+  set allowsBackground(bool value) {
+    if (_allowsBackground == value) return;
+    _allowsBackground = value;
+    _sync();
+  }
 
   void attach() {
     if (_observing) return;
@@ -60,21 +79,26 @@ class SessionKeepAlive with WidgetsBindingObserver {
       _observing = false;
       WidgetsBinding.instance.removeObserver(this);
     }
-    _timer?.cancel();
-    _timer = null;
+    stop();
   }
 
   /// 拿到新的登录凭据后重新排期。
   void restart() {
+    _scheduleGeneration++;
     _armed = true;
+    _timer?.cancel();
+    _timer = null;
+    _nextProbeAt = _clock().add(_nextDelay());
     _sync();
   }
 
   /// 登出或确认失效后永久停摆，直到下一次 [restart]。
   void stop() {
+    _scheduleGeneration++;
     _armed = false;
     _timer?.cancel();
     _timer = null;
+    _nextProbeAt = null;
   }
 
   @override
@@ -86,13 +110,20 @@ class SessionKeepAlive with WidgetsBindingObserver {
   }
 
   void _sync() {
-    _timer?.cancel();
-    _timer = null;
-    if (!_armed || !_foreground || _probing) return;
-    _timer = Timer(_nextDelay(), _runOnce);
+    final onDuty = _foreground || _allowsBackground;
+    if (!_armed || !onDuty || _probing) {
+      _timer?.cancel();
+      _timer = null;
+      return;
+    }
+    if (_timer != null) return;
+    final now = _clock();
+    _nextProbeAt ??= now.add(_nextDelay());
+    final remaining = _nextProbeAt!.difference(now);
+    _timer = Timer(remaining.isNegative ? Duration.zero : remaining, _runOnce);
   }
 
-  /// 在 4–6 小时之间抖动，避免每次启动都卡在同一个整点。
+  /// 在 45–75 分钟之间抖动，避免每次启动都卡在同一个整点。
   Duration _nextDelay() {
     final span = _max.inMilliseconds - _min.inMilliseconds;
     if (span <= 0) return _min;
@@ -101,7 +132,9 @@ class SessionKeepAlive with WidgetsBindingObserver {
 
   Future<void> _runOnce() async {
     _timer = null;
+    _nextProbeAt = null;
     _probing = true;
+    final generation = _scheduleGeneration;
     final epochOf = sessionEpoch;
     final epoch = epochOf?.call();
     var result = SessionProbe.unknown;
@@ -112,10 +145,11 @@ class SessionKeepAlive with WidgetsBindingObserver {
     } finally {
       _probing = false;
     }
+    if (!_armed) return;
 
-    // 探测期间换号或退出时，这次结论属于上一个会话：既不能宣布新会话失效，
-    // 也不能把新会话标成已验证，只把保活重新排到当前凭据上。
-    if (epochOf != null && epochOf() != epoch) {
+    // 重启调度或换号后，旧探测只能恢复排期，不能再提交结论。
+    if (_scheduleGeneration != generation ||
+        (epochOf != null && epochOf() != epoch)) {
       _sync();
       return;
     }

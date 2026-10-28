@@ -549,8 +549,8 @@ void main() {
     });
   });
 
-  group('静默续签', () {
-    /// 续期是后台动作，`markSessionRevoked()` 不等它；这里把事件队列跑空。
+  group('通行证票据与失效判定', () {
+    /// 换票与退出都是后台动作，调用方不等它们；这里把事件队列跑空。
     Future<void> settle() async {
       for (var i = 0; i < 8; i++) {
         await Future<void>.delayed(Duration.zero);
@@ -563,14 +563,12 @@ void main() {
       PassportStubAdapter adapter, {
       SessionRejectLedger? ledger,
       Future<void> Function()? onAutoSignOut,
-      Duration cooldown = const Duration(minutes: 10),
     }) => AccountProvider(
       cookieStore: cookieStore,
       authSessionStore: AuthSessionStore(storage: storage),
       passportTicketStore: PassportTicketStore(storage: storage),
       passportApi: MiguPassportApi(dio: dioWith(adapter)),
       ledger: ledger,
-      renewalCooldown: cooldown,
       onAutoSignOut: onAutoSignOut,
     );
 
@@ -593,8 +591,8 @@ void main() {
       expect(storage.values[PassportTicketStore.defaultKey], isNull);
     });
 
-    test('账号接口回绝时先换新会话，成功就不降级也不退登', () async {
-      final (ledger, _) = testLedger();
+    test('失效判定不再白发续期，两次独立回绝一定自动退出', () async {
+      final (ledger, clock) = testLedger();
       final storage = FakeSecureCookieStorage();
       final cookieStore = MiguCookieStore(secureStorage: storage);
       await cookieStore.init();
@@ -602,66 +600,7 @@ void main() {
         renewCookie: 'pacmtoken=pacm-renewed; Domain=migu.cn; Path=/',
       );
       var autoSignOuts = 0;
-      final account = build(
-        storage,
-        cookieStore,
-        adapter,
-        ledger: ledger,
-        onAutoSignOut: () async => autoSignOuts++,
-      );
-      await account.initialize();
-      await account.signInWithSmsCode(phone: '13800000000', code: '248157');
-
-      noteAccountRejection(ledger);
-      account.markSessionRevoked();
-      await settle();
-
-      // 登录一次换票，续期再换一次，用的就是本机留存的票据。
-      final validations = adapter.requests
-          .where((request) => request.uri.path.contains('token-validate'))
-          .toList();
-      expect(validations, hasLength(2));
-      expect(validations.last.queryParameters['token'], 'STnidStubToken');
-      expect(cookieStore.credentials.pacmtoken, 'pacm-renewed');
-      expect(account.status, AuthStatus.verified);
-      expect(ledger.strikes, 0);
-      expect(account.hasLogin, isTrue);
-      expect(autoSignOuts, 0);
-
-      // 刚换完就又被拒：冷却期内不再换第二次，只降级，凭据保留。
-      noteAccountRejection(ledger);
-      account.markSessionRevoked();
-      await settle();
-      expect(
-        adapter.requests.where((r) => r.uri.path.contains('token-validate')),
-        hasLength(2),
-      );
-      expect(account.status, AuthStatus.rejected);
-      expect(account.hasLogin, isTrue);
-
-      // 换过账号就是新的一份凭据，上一次会话的冷却不能拦住它。
-      await account.signOut();
-      await account.signInWithSmsCode(phone: '13800000000', code: '248157');
-      noteAccountRejection(ledger);
-      account.markSessionRevoked();
-      await settle();
-      // 这次登录自己换了一次票，续期又换了一次。
-      expect(
-        adapter.requests.where((r) => r.uri.path.contains('token-validate')),
-        hasLength(4),
-      );
-      expect(account.status, AuthStatus.verified);
-    });
-
-    test('续期换不到就回到原来的两步判定，期间凭据不动', () async {
-      final (ledger, clock) = testLedger();
-      final storage = FakeSecureCookieStorage();
-      final cookieStore = MiguCookieStore(secureStorage: storage);
-      await cookieStore.init();
-      // 咪咕不认这张票据：续期请求成功返回，但没有下发新会话。
-      final adapter = PassportStubAdapter(renewCookie: '');
       late final AccountProvider account;
-      var autoSignOuts = 0;
       account = build(
         storage,
         cookieStore,
@@ -679,23 +618,82 @@ void main() {
       account.markSessionRevoked();
       await settle();
 
-      expect(cookieStore.credentials.pacmtoken, 'pacm-stub-value');
-      expect(account.hasLogin, isTrue);
+      // 只有登录那一次换票：判定失效不再顺手发一个注定失败的续期请求。
+      expect(
+        adapter.requests.where((r) => r.uri.path.contains('token-validate')),
+        hasLength(1),
+      );
       expect(account.status, AuthStatus.rejected);
+      expect(account.hasLogin, isTrue);
       expect(autoSignOuts, 0);
 
+      // 隔过取证间隔再被拒一次，两步判定必须走完：以前这一步被续期吞掉了，
+      // 界面因此长期挂着死凭据，功能坏着却不退出，只能用户手动重登。
       clock.advance(const Duration(minutes: 31));
       noteAccountRejection(ledger, code: '290001', info: '请先登录');
       account.markSessionRevoked();
       await settle();
 
+      expect(ledger.strikes, 0);
       expect(autoSignOuts, 1);
       expect(account.hasLogin, isFalse);
-      expect(storage.values[PassportTicketStore.defaultKey], isNull);
-      expect(account.autoSignOutNotice, contains('自动退出'));
+      expect(cookieStore.credentials.pacmtoken, isNull);
+      expect(
+        adapter.requests.where((r) => r.uri.path.contains('token-validate')),
+        hasLength(1),
+      );
     });
 
-    test('官方页面登录没有票据，不会主动请求续期', () async {
+    test('调试入口手动换票成功时写回新凭据、计数清零', () async {
+      final (ledger, _) = testLedger();
+      final storage = FakeSecureCookieStorage();
+      final cookieStore = MiguCookieStore(secureStorage: storage);
+      await cookieStore.init();
+      final adapter = PassportStubAdapter(
+        renewCookie: 'pacmtoken=pacm-renewed; Domain=migu.cn; Path=/',
+      );
+      final account = build(storage, cookieStore, adapter, ledger: ledger);
+      await account.initialize();
+      await account.signInWithSmsCode(phone: '13800000000', code: '248157');
+
+      noteAccountRejection(ledger);
+      expect(account.debugRenewNow(), '已发起一次换票');
+      await settle();
+
+      final validations = adapter.requests
+          .where((request) => request.uri.path.contains('token-validate'))
+          .toList();
+      expect(validations, hasLength(2));
+      expect(validations.last.queryParameters['token'], 'STnidStubToken');
+      expect(cookieStore.credentials.pacmtoken, 'pacm-renewed');
+      expect(account.status, AuthStatus.verified);
+      expect(ledger.strikes, 0);
+      expect(account.hasLogin, isTrue);
+    });
+
+    test('调试入口换不到凭据时只降级，凭据与票据都不动', () async {
+      final (ledger, _) = testLedger();
+      final storage = FakeSecureCookieStorage();
+      final cookieStore = MiguCookieStore(secureStorage: storage);
+      await cookieStore.init();
+      // 咪咕不认这张票据（真机就是这一档：200 + 199999，不下发新会话）。
+      final adapter = PassportStubAdapter(renewCookie: '');
+      final account = build(storage, cookieStore, adapter, ledger: ledger);
+      await account.initialize();
+      await account.signInWithSmsCode(phone: '13800000000', code: '248157');
+
+      noteAccountRejection(ledger, code: '290001', info: '请先登录');
+      expect(account.debugRenewNow(), '已发起一次换票');
+      await settle();
+
+      // 换票失败只要不是 401，就不能替服务端判死：只降级，不退登。
+      expect(account.status, AuthStatus.rejected);
+      expect(account.hasLogin, isTrue);
+      expect(cookieStore.credentials.pacmtoken, 'pacm-stub-value');
+      expect(storage.values[PassportTicketStore.defaultKey], 'STnidStubToken');
+    });
+
+    test('官方页面登录没有票据，失效只走两步判定', () async {
       final (ledger, _) = testLedger();
       final storage = FakeSecureCookieStorage();
       final cookieStore = MiguCookieStore(secureStorage: storage);
@@ -712,6 +710,12 @@ void main() {
       expect(adapter.requests, isEmpty);
       expect(account.status, AuthStatus.rejected);
       expect(account.hasLogin, isTrue);
+
+      // 同一份缺票据的会话，调试入口也不该碰网络。
+      expect(adapter.requests, isEmpty);
+      expect(account.debugRenewNow(), '本机没有留存票据，这次没试');
+      await settle();
+      expect(adapter.requests, isEmpty);
     });
 
     test('票据读写去掉空白，空值按删除处理', () async {

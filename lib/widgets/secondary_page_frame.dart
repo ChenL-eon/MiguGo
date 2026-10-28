@@ -15,7 +15,7 @@ void openSettingsPage(BuildContext context) {
     AppPageRoute<void>(
       builder: (_) => const SecondaryPageFrame(
         title: '设置',
-        subtitle: '所有改动即时生效并保存在本机',
+        subtitle: '个性化你的播放器',
         child: SettingsPage(),
       ),
     ),

@@ -29,7 +29,6 @@ import '../widgets/player_background.dart';
 import '../widgets/player_queue_dialog.dart';
 import '../widgets/state_views.dart';
 import '../widgets/tag_pill.dart';
-import '../widgets/volume_slider.dart';
 import '../widgets/web_player_panel.dart';
 import '../widgets/app_window_caption.dart';
 import '../widgets/window_chrome.dart';
@@ -940,8 +939,6 @@ class _PlayerPageState extends State<PlayerPage> {
         _PlaybackControls(player: player),
         const SizedBox(height: 4),
         PlayerProgressBar(player: player, song: song),
-        const SizedBox(height: 6),
-        _VolumeControl(player: player),
         if (!centered) ...[
           const SizedBox(height: 14),
           Row(
@@ -1156,11 +1153,11 @@ class _PlayerPageState extends State<PlayerPage> {
                     curve: Curves.easeOut,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      fontSize: active ? 18.5 : 14.5,
+                      fontSize: active ? 26 : 20,
                       height: 1.6,
                       fontWeight: active ? FontWeight.w700 : FontWeight.w500,
                       shadows: active
-                          ? [Shadow(color: context.palette.shadow, blurRadius: 14)]
+                          ? [Shadow(color: context.palette.shadow, blurRadius: 16)]
                           : const [],
                       color: active
                           ? context.palette.textPrimary
@@ -1180,6 +1177,8 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 }
 
+/// 桌面端播放页封面：这里边长到 318dp，必须用 [Song.coverUrlLarge] 的
+/// 800px 档，列表用的 200px 档放大后会糊。
 class _CoverStage extends StatelessWidget {
   const _CoverStage({required this.song, required this.size});
 
@@ -1188,6 +1187,7 @@ class _CoverStage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cover = song.coverUrlLarge ?? song.coverUrl;
     return Center(
       child: Stack(
         alignment: Alignment.center,
@@ -1218,16 +1218,11 @@ class _CoverStage extends StatelessWidget {
               );
             },
             child: Container(
-              key: ValueKey('${song.contentId}|${song.coverUrl}'),
+              key: ValueKey('${song.contentId}|$cover'),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(28),
                 border: Border.all(color: context.palette.lineStrong),
                 boxShadow: [
-                  BoxShadow(
-                    color: context.palette.shadow,
-                    blurRadius: 42,
-                    offset: const Offset(0, 20),
-                  ),
                   BoxShadow(
                     color: context.palette.accent.withValues(alpha: 0.09),
                     blurRadius: 60,
@@ -1236,7 +1231,7 @@ class _CoverStage extends StatelessWidget {
                 ],
               ),
               child: CoverArt(
-                imageUrl: song.coverUrl,
+                imageUrl: cover,
                 seed: song.name,
                 size: size,
                 borderRadius: BorderRadius.circular(28),
@@ -1668,39 +1663,6 @@ class _PlayButton extends StatelessWidget {
   }
 }
 
-class _VolumeControl extends StatelessWidget {
-  const _VolumeControl({required this.player});
-
-  final PlayerProvider player;
-
-  @override
-  Widget build(BuildContext context) {
-    final muted = player.volume <= 0.001;
-    final low = !muted && player.volume < 0.5;
-    return Row(
-      children: [
-        const SizedBox(width: 8),
-        Icon(
-          muted
-              ? Icons.volume_off_rounded
-              : low
-              ? Icons.volume_down_rounded
-              : Icons.volume_up_rounded,
-          size: 17,
-          color: context.palette.textMuted,
-        ),
-        Expanded(
-          child: VolumeSlider(
-            value: player.volume,
-            onChanged: (value) => unawaited(player.setVolume(value)),
-          ),
-        ),
-        const SizedBox(width: 8),
-      ],
-    );
-  }
-}
-
 class _ErrorBanner extends StatelessWidget {
   const _ErrorBanner({
     required this.message,
@@ -1966,11 +1928,6 @@ class _AndroidCoverStage extends StatelessWidget {
                   borderRadius: BorderRadius.circular(AndroidRadius.lg),
                   border: Border.all(color: palette.lineStrong),
                   boxShadow: [
-                    BoxShadow(
-                      color: palette.shadow,
-                      blurRadius: 34,
-                      offset: const Offset(0, 18),
-                    ),
                     BoxShadow(
                       color: Colors.white.withValues(alpha: 0.06),
                       blurRadius: 48,

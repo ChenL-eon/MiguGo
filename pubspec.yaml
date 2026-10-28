@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: ^3.13.5
@@ -44,6 +44,7 @@ dependencies:
   flutter_secure_storage: ^11.2.0
   hotkey_manager: ^0.2.3
   window_manager: ^0.5.2
+  tray_manager: ^0.2.4
   just_audio_windows: ^0.2.3
   flutter_media_session: ^3.0.9
   scrollable_positioned_list: ^0.3.8
@@ -79,6 +80,7 @@ flutter:
   assets:
     - assets/github_mark.png
     - assets/svg/MiguGo.svg
+    - assets/tray/tray_icon.ico
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

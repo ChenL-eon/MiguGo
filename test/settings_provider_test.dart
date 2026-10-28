@@ -26,6 +26,8 @@ void main() {
     expect(settings.globalSpaceHotkeyEnabled, isFalse);
     expect(settings.rememberVolume, isTrue);
     expect(settings.recordSearchHistoryEnabled, isTrue);
+    // 常驻托盘会让进程在窗口关掉后继续跑，隐私政策承诺的「默认关闭」落在这里。
+    expect(settings.backgroundKeepAliveEnabled, isFalse);
     expect(settings.searchHistory, isEmpty);
     expect(settings.volume, 1);
     expect(settings.audioQuality, AudioQuality.hq);
@@ -51,6 +53,7 @@ void main() {
     await settings.setLyricsAutoScrollEnabled(false);
     await settings.setInAppSpaceShortcutEnabled(false);
     await settings.setGlobalSpaceHotkeyEnabled(true);
+    await settings.setBackgroundKeepAliveEnabled(true);
 
     final restored = SettingsProvider();
     await restored.load();
@@ -60,6 +63,22 @@ void main() {
     expect(restored.lyricsAutoScrollEnabled, isFalse);
     expect(restored.inAppSpaceShortcutEnabled, isFalse);
     expect(restored.globalSpaceHotkeyEnabled, isTrue);
+    expect(restored.backgroundKeepAliveEnabled, isTrue);
+  });
+
+  test('常驻托盘开关不受恢复默认影响', () async {
+    final settings = SettingsProvider();
+    await settings.load();
+    await settings.setBackgroundKeepAliveEnabled(true);
+
+    // 「恢复默认」只清点名的那几组，账户这一项由用户自己留着，
+    // 否则刚把窗口收进托盘的用户会被一次无关的重置踢回常规退出。
+    await settings.resetToDefaults();
+    expect(settings.backgroundKeepAliveEnabled, isTrue);
+
+    final restored = SettingsProvider();
+    await restored.load();
+    expect(restored.backgroundKeepAliveEnabled, isTrue);
   });
 
   test('主题色会持久化，恢复默认后回到玫粉', () async {
@@ -82,12 +101,12 @@ void main() {
   test('播放音质选择会持久化并在重启后恢复', () async {
     final settings = SettingsProvider();
     await settings.load();
-    await settings.setAudioQuality(AudioQuality.sq);
+    await settings.setAudioQuality(AudioQuality.zq24);
 
     final restored = SettingsProvider();
     await restored.load();
 
-    expect(restored.audioQuality, AudioQuality.sq);
+    expect(restored.audioQuality, AudioQuality.zq24);
   });
 
   test('搜索历史去重、优先最近一条并限制为 10 条', () async {

@@ -92,12 +92,31 @@ void main() {
       noteAccountRejection(ledger, code: '290001', info: '请先登录');
       await Future<void>.delayed(Duration.zero);
 
-      final reopened = SessionRejectLedger();
+      // 一小时后重启：旧账仍在 strikeWindow 内，应当原样读回。
+      final reopened = SessionRejectLedger(
+        clock: () => DateTime(2026, 10, 24, 10),
+      );
       await reopened.init();
 
       expect(reopened.strikes, 1);
       expect(reopened.last!.path, '/user/h5/user-info/v1.0');
       expect(reopened.last!.info, '请先登录');
+    });
+
+    test('超过 24 小时的旧账作废，新一次拒绝只算第一次', () async {
+      final ledger = await prefsLedger(StepClock());
+      noteAccountRejection(ledger);
+      await Future<void>.delayed(Duration.zero);
+
+      // 25 小时后重启：几周前的一次拒绝不能和新启动时的第一次凑成两次取证。
+      final reopened = SessionRejectLedger(
+        clock: () => DateTime(2026, 10, 25, 10),
+      );
+      await reopened.init();
+      expect(reopened.strikes, 0);
+
+      noteAccountRejection(reopened);
+      expect(reopened.strikes, 1);
     });
 
     test('损坏的记录被忽略，不影响新的一次', () async {

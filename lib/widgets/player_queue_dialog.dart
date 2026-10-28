@@ -224,57 +224,6 @@ class _AndroidQueueSheet extends StatelessWidget {
   }
 }
 
-Future<void> showVolumeDialog(BuildContext context) async {
-  await showDialog<void>(
-    context: context,
-    builder: (dialogContext) {
-      final player = dialogContext.watch<PlayerProvider>();
-      final palette = dialogContext.palette;
-      return AlertDialog(
-        backgroundColor: palette.surfaceHigh,
-        surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(22),
-          side: BorderSide(color: palette.line),
-        ),
-        title: const Text('音量'),
-        content: SizedBox(
-          width: 320,
-          child: Row(
-            children: [
-              Icon(
-                player.volume <= 0 ? Icons.volume_off_rounded : Icons.volume_up_rounded,
-                size: 20,
-                color: palette.textSecondary,
-              ),
-              Expanded(
-                child: Slider(
-                  value: player.volume,
-                  onChanged: (value) => unawaited(player.setVolume(value)),
-                ),
-              ),
-              SizedBox(
-                width: 40,
-                child: Text(
-                  '${(player.volume * 100).round()}%',
-                  textAlign: TextAlign.end,
-                  style: TextStyle(fontSize: 12, color: palette.textSecondary),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('完成'),
-          ),
-        ],
-      );
-    },
-  );
-}
-
 Future<void> showSpeedDialog(BuildContext context) async {
   await showDialog<void>(
     context: context,

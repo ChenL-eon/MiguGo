@@ -187,7 +187,7 @@ void main() {
           sentinel: tokenOfB,
           pacmtoken: 'pacm-b',
           sid: 's-b',
-          webPacmtoken: 'web-b',
+          webPacmtoken: 'pacm-b',
           hasA: false,
         ),
       );
@@ -246,7 +246,7 @@ void main() {
           sentinel: tokenOfA,
           profilePacmtoken: 'pacm-a',
           changed: 0,
-          storePacmtoken: 'web-b',
+          storePacmtoken: 'pacm-b',
           storeSid: 's-b',
           tokenOfA: tokenOfA,
         ),
@@ -270,7 +270,7 @@ void main() {
           pacmtoken: store.loginSnapshot['mg_auth_pacmtoken'],
           sid: store.loginSnapshot['mg_auth_sid'],
         ),
-        (changed: 0, pacmtoken: 'web-b', sid: 's-b'),
+        (changed: 0, pacmtoken: 'pacm-b', sid: 's-b'),
       );
     });
 

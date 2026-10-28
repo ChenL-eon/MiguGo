@@ -77,7 +77,7 @@ class PlayerBackgroundLayer extends StatelessWidget {
 
   Widget _coverSource() {
     return CoverArt(
-      imageUrl: song?.coverUrl,
+      imageUrl: song?.coverUrlLarge ?? song?.coverUrl,
       seed: song?.name ?? 'MiguGo',
       borderRadius: BorderRadius.zero,
     );

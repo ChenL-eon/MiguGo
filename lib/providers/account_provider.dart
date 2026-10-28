@@ -12,6 +12,8 @@ import '../services/api/migu_music_api.dart';
 import '../services/api/passport_ticket_store.dart';
 import '../services/api/secure_cookie_storage.dart';
 import '../services/auth/migu_passport_api.dart';
+import '../services/auth/session_probe.dart';
+import '../services/auth/session_probe_diagnostics.dart';
 import '../services/auth/session_reject_ledger.dart';
 
 /// 管理咪咕登录凭据与本地认证状态。
@@ -27,7 +29,7 @@ class AccountProvider extends ChangeNotifier {
     PassportTicketStore? passportTicketStore,
     MiguPassportApi? passportApi,
     SessionRejectLedger? ledger,
-    this.renewalCooldown = const Duration(minutes: 10),
+    this.diagnostics,
     this.onSessionEstablished,
     this.onSessionLost,
     this.onAutoSignOut,
@@ -45,8 +47,9 @@ class AccountProvider extends ChangeNotifier {
   final PassportTicketStore _ticketStore;
   final MiguPassportApi? _injectedPassport;
 
-  /// 两次主动续期之间至少隔这么久，避免一批同时失败的请求各换一次会话。
-  final Duration renewalCooldown;
+  /// 调试版的登录探测记录。调试入口主动换票的结果也写进同一份记录，现场才能
+  /// 看出这张票到底换没换到新凭据；正式版自己会不写。
+  final SessionProbeDiagnostics? diagnostics;
 
   /// 「凭据被拒」的取证与计数；里面只有接口地址和服务端编码，没有凭据。
   final SessionRejectLedger _ledger;
@@ -68,7 +71,8 @@ class AccountProvider extends ChangeNotifier {
   String? _autoSignOutNotice;
   bool _initialized = false;
 
-  /// 原生登录留下的通行证票据；只有它存在时才可能静默续期。
+  /// 原生登录留下的通行证票据。咪咕在第一次换票时就把这张票用掉了，它换不回
+  /// 第二个会话（2026-10-26 真机确认），所以本机只是留着它，供调试入口复测。
   String? _ticket;
 
   /// 票据的修订号：每次写入、删除或条件清理都 +1。
@@ -77,7 +81,6 @@ class AccountProvider extends ChangeNotifier {
 
   /// 正在续期的那次会话代数；旧会话的续期不能占住新会话的名额。
   int? _renewingEpoch;
-  DateTime? _lastRenewalAt;
 
   /// 凭据代数：换号、退出都会 +1。续期是异步的，恢复执行时必须确认
   /// 期间没有发生换号或退出，否则旧会话的结果会写进新会话。
@@ -251,8 +254,8 @@ class AccountProvider extends ChangeNotifier {
       AuthStatus.verified => '咪咕服务端已接受当前登录凭据。VIP 曲目能否播放，仍由账号权益决定。',
       AuthStatus.rejected =>
         '最近一次请求被拒绝：登录可能已失效，也可能是账号没有该歌曲权限。'
-            '原生登录的账号会先用本机留存的登录票据自动续期一次；'
-            '续期没成功或本机没有票据时，在上方重新登录一次即可。'
+            '本机留存的登录票据在登录那一次就被咪咕用掉了，换不来新凭据，'
+            '在上方重新登录一次即可恢复。'
             '${_rejectedEvidenceSuffix()}',
     };
   }
@@ -461,29 +464,75 @@ class AccountProvider extends ChangeNotifier {
 
   /// 咪咕回绝了一个要求登录的账号接口（HTTP 401 或业务码“请先登录”）。
   ///
-  /// 原生登录过、本机留有通行证票据时，先用它静默换一次新会话：换到了就继续用，
-  /// 状态回到“已验证”，这次拒绝不再算账。换不到才按原来的规则处理——第一次只把
-  /// 状态降级、把证据留下，凭据照旧保留；隔过 [SessionRejectLedger.confirmGap]
-  /// 之后再次被拒，才认定这份凭据真的作废，走自动退出。期间只要有一次账号接口
-  /// 成功，计数就清零。
+  /// 第一次只把状态降级、把证据留下，凭据照旧保留；隔过
+  /// [SessionRejectLedger.confirmGap] 之后再次被拒，才认定这份凭据真的作废，
+  /// 走自动退出。期间只要有一次账号接口成功，计数就清零。
+  ///
+  /// 这里原来会先用留存的通行证票据静默换一次会话再裁决。2026-10-26 真机确认
+  /// 那张票在第一次换票时就被咪咕消耗掉了：会话还认的时候（同一份凭据几秒前刚回
+  /// `000000`），拿签发不到一分钟的票据再换一次，回的是 `HTTP 200 + 199999`，
+  /// 不下发新的 `pacmtoken`。那次请求注定失败，却因为分类成「分不清票据问题还是
+  /// 服务抖动」而只走到 `markRejected`，把上面这套两步判定整段吞掉——界面长期
+  /// 挂着已经死掉的凭据，功能坏着却不自动退出，只能用户手动重登。所以自动路径
+  /// 不再发这个请求；换票本身留给 [debugRenewNow] 复测用。
   ///
   /// 403 不走这里——那可能只是这首歌没有权益，见 [markRejected]。
   void markSessionRevoked() {
     if (!hasLogin) return;
-    // 同一会话续期期间回来的拒绝交给那次续期统一裁决；
-    // 上一个会话的续期不该挡住新会话自己的续期。
+    // 一次手动续期在飞时不叠加裁决，等它自己收尾。
     if (_renewingEpoch == _credentialEpoch) return;
-    final ticket = _ticket;
-    if (ticket != null) {
-      final now = DateTime.now();
-      final last = _lastRenewalAt;
-      if (last == null || now.difference(last) >= renewalCooldown) {
-        _lastRenewalAt = now;
-        unawaited(_renewSession(ticket));
-        return;
-      }
-    }
     _applyRevocation();
+  }
+
+  /// 往调试记录里写一条续期事件，[verdict] 借用探测那三个值表示结果。
+  ///
+  /// [error] 带上时顺手记它的 HTTP 状态与业务码：「分不清票据还是服务抖动」
+  /// 这一档全靠这两个数才有意义，只看句子分不出是 403 风控还是 200+199999。
+  void _noteRenewal(
+    SessionProbe verdict,
+    String note, {
+    bool rotated = false,
+    MiguLoginException? error,
+  }) {
+    final diagnostics = this.diagnostics;
+    if (diagnostics == null || !diagnostics.enabled) return;
+    unawaited(
+      diagnostics.record(
+        SessionProbeRecord(
+          at: DateTime.now(),
+          trigger: SessionProbeDiagnostics.renewalTrigger,
+          verdict: verdict,
+          officialStatus: error?.httpStatus,
+          officialCode: error?.officialCode ?? '',
+          // 借 officialInfo 这一格放回包形态；探测行才用它装服务端文案。
+          officialInfo: error?.bodyHint ?? '',
+          rotated: rotated,
+          note: note,
+        ),
+      ),
+    );
+  }
+
+  /// 调试用：不等探测判死，立刻用留存票据试一次换票，结果照旧写进探测记录。
+  ///
+  /// 「票据到底换不回第二个会话」就是这个入口测出来的：2026-10-26 在刚登录完、
+  /// 同一份凭据几秒前才回过 `000000` 的当口按下，两次都拿到 `HTTP 200 + 199999`
+  /// 且不下发新的 `pacmtoken`。自动路径因此不再发这个请求（见 [markSessionRevoked]），
+  /// 但保留这条手动测法：哪天咪咕改了新接口或让票据可复用，一次点击就能看出来。
+  String debugRenewNow() {
+    final ticket = _ticket;
+    if (!hasLogin || ticket == null) {
+      _noteRenewal(SessionProbe.unknown, '调试：本机没有可用票据');
+      return '本机没有留存票据，这次没试';
+    }
+    // 一次只让一个续期在飞，别叠上去把结果搅混。
+    if (_renewingEpoch == _credentialEpoch) {
+      _noteRenewal(SessionProbe.unknown, '调试：已有一次续期在飞，这次不叠加');
+      return '已有一次续期在飞，这次没叠加';
+    }
+    _noteRenewal(SessionProbe.unknown, '调试：主动发起一次续期');
+    unawaited(_renewSession(ticket));
+    return '已发起一次换票';
   }
 
   void _applyRevocation() {
@@ -495,17 +544,26 @@ class AccountProvider extends ChangeNotifier {
     _confirmRevoked();
   }
 
-  /// 用留存的登录票据换一份新会话；换不到就回到原来的两步判定。
+  /// 用留存的登录票据换一份新会话；只有 [debugRenewNow] 会走这里。
   Future<void> _renewSession(String ticket) async {
     final epoch = _credentialEpoch;
+    // 换票期间的凭据改写只认这一代登录：期间退出或换号，结果不准写回。
+    final generation = _cookieStore.webSyncToken;
     _renewingEpoch = epoch;
     try {
       final renewed = await _passport.renewSession(ticket);
       final pacmtoken = renewed.cookies['pacmtoken'] ?? '';
+      if (pacmtoken.isEmpty) {
+        _noteRenewal(SessionProbe.unknown, '咪咕回包了，但没下发新的 pacmtoken');
+        return;
+      }
       // 期间用户可能已经退出或换了账号，那份凭证不能写回去。
-      if (pacmtoken.isEmpty || !_isCurrentSession(epoch, ticket)) return;
+      if (!_isCurrentSession(epoch, ticket)) return;
 
-      await _cookieStore.applyRenewedCredentials(renewed.cookies);
+      await _cookieStore.applyRenewedCredentials(
+        renewed.cookies,
+        loginGeneration: generation,
+      );
       // 写凭据本身也要 await：期间若完成换号或退出，只认新的那份会话。
       if (!_isCurrentSession(epoch, ticket)) return;
 
@@ -524,15 +582,37 @@ class AccountProvider extends ChangeNotifier {
       await _persistSession();
       // 状态落盘本身也可能跨越退出登录：收尾回调只能在会话仍然有效时触发。
       if (!_isCurrentSession(epoch, ticket)) return;
+      _noteRenewal(
+        SessionProbe.alive,
+        '换到新凭据并写回，计数清零，状态回到已验证',
+        rotated: true,
+      );
       onSessionEstablished?.call();
       unawaited(_refreshAfterRenewal());
     } on MiguLoginException catch (error) {
       // 请求没到达咪咕就谈不上「凭据被拒」：弱网里一次掉线不该替服务端把账记满，
       // 更不该把用户永久登出。状态保持原样，等下一次真的问到结果再说。
-      if (error.networkInterrupted) return;
-      if (_isCurrentSession(epoch, ticket)) _applyRevocation();
+      if (error.networkInterrupted) {
+        _noteRenewal(SessionProbe.unknown, '请求没到达咪咕，没问到结果');
+        return;
+      }
+      if (!_isCurrentSession(epoch, ticket)) return;
+      // 咪咕答了但答案分不清票据问题还是服务抖动：只降级状态，凭据原样保留。
+      // 只有 HTTP 401 这种明确回绝才允许进入作废判定。
+      if (error.transient) {
+        _noteRenewal(
+          SessionProbe.unknown,
+          '咪咕答了但分不清票据问题还是服务抖动',
+          error: error,
+        );
+        markRejected();
+        return;
+      }
+      _noteRenewal(SessionProbe.revoked, '咪咕明确回绝这张票据', error: error);
+      _applyRevocation();
     } catch (_) {
       // 意料之外的错误同样证明不了凭据作废：只降级状态、留证据，凭据照旧保留。
+      _noteRenewal(SessionProbe.unknown, '意料之外的异常，证明不了凭据作废');
       if (_isCurrentSession(epoch, ticket)) markRejected();
     } finally {
       // 只结束自己那一次；期间新会话可能已经发起了新的续期。
@@ -569,7 +649,7 @@ class AccountProvider extends ChangeNotifier {
     try {
       await _ticketStore.write(trimmed);
     } on SecureCookieStorageException {
-      _setSessionWarning('系统安全存储不可用，登录票据仅在本次运行内可用于续期。');
+      _setSessionWarning('系统安全存储不可用，登录票据只留在本次运行内，重启后调试入口没法再复测。');
     }
     return revision;
   }
@@ -577,8 +657,6 @@ class AccountProvider extends ChangeNotifier {
   Future<void> _forgetTicket() async {
     _ticket = null;
     _ticketRevision++;
-    // 换了账号就是新的一份凭据，上一次会话的冷却不能拦住它。
-    _lastRenewalAt = null;
     try {
       await _ticketStore.clear();
     } on SecureCookieStorageException {
@@ -599,7 +677,6 @@ class AccountProvider extends ChangeNotifier {
     if (_ticketRevision != revision || _ticket != trimmed) return;
     _ticket = null;
     _ticketRevision++;
-    _lastRenewalAt = null;
     try {
       await _ticketStore.clear();
     } on SecureCookieStorageException {
@@ -642,7 +719,7 @@ class AccountProvider extends ChangeNotifier {
     // 这样新登录只能排在这次退出后面：旧退出的回调、保活停止和删除
     // 不会在 B 已经登录成功后再补一次，更不会删掉 B 刚写入的状态。
     final cookiesCleared = _cookieStore.clearLoginCookies();
-    // 票据也是凭据的一部分：退出后若还留着，下次判定失效时会拿它换回会话。
+    // 票据是凭据的一部分，退出就不该在这台机器上留下它。
     final ticketCleared = _forgetTicket();
     // 凭据已经不在这台机器上了，被拒记录留着也解释不了任何东西。
     _ledger.clear();

@@ -690,13 +690,6 @@ class _Cover extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: context.palette.shadow,
-            blurRadius: 26,
-            offset: const Offset(0, 12),
-          ),
-        ],
       ),
       child: CoverArt(
         imageUrl: playlist.coverUrl,

@@ -97,9 +97,15 @@ class WebLoginCookieSet {
   /// 网页在同域下写的设备号、埋点会话与统计 Cookie 一概不带出 WebView，
   /// 与「其余 Cookie 一概不取」的声明保持一致。
   String? get header {
-    final credentials = cookies
-        .where((cookie) => isLoginCredentialCookieName(cookie.name))
-        .toList(growable: false);
+    final unique = <String, WebLoginCookie>{};
+    for (final cookie in scopedCookies) {
+      if (cookie.value.trim().isEmpty) continue;
+      if (!isLoginCredentialCookieName(cookie.name)) continue;
+      if (!_appliesToHost(cookie.domain, 'music.migu.cn')) continue;
+      unique.putIfAbsent(cookie.name, () => cookie);
+    }
+    final credentials = unique.values.toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
     if (credentials.isEmpty) return null;
     return credentials.map((cookie) => '${cookie.name}=${cookie.value}').join('; ');
   }

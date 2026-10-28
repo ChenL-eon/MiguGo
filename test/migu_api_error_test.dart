@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:migu_lele/models/audio_quality.dart';
 import 'package:migu_lele/models/song.dart';
 import 'package:migu_lele/services/api/migu_api_client.dart';
 import 'package:migu_lele/services/api/migu_api_exception.dart';
@@ -257,6 +258,106 @@ void main() {
         'PQ',
       ]);
       expect(verified, 1);
+    });
+
+    test('VIP 的至臻直发时按 ZQ24 请求并采用地址', () async {
+      final cookieStore = await createCookieStore();
+      await cookieStore.importLoginCookies('pacmtoken=p1; uid=u1');
+      final adapter = _FakeAdapter(
+        (_) => _sealedBody(
+          '{"code":"000000","data":{'
+          '"url":"https://cdn.example.com/zq24.flac","audioFormatType":"ZQ24"}}',
+        ),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      var verified = 0;
+      final api = MiguMusicApi(
+        client: MiguApiClient(dio: dio, cookieStore: cookieStore),
+        onAuthVerified: () => verified++,
+      );
+
+      final url = await api.resolvePlaybackUrl(_vipSong, quality: AudioQuality.zq24);
+
+      expect(url, 'https://cdn.example.com/zq24.flac');
+      expect(adapter.requests.single.uri.queryParameters['toneFlag'], 'ZQ24');
+      expect(verified, 1);
+    });
+
+    test('VIP 的 ZQ24 被服务端拒绝后回退 SQ', () async {
+      final cookieStore = await createCookieStore();
+      await cookieStore.importLoginCookies('pacmtoken=p1; uid=u1');
+      final adapter = _FakeAdapter(
+        (options) => options.uri.queryParameters['toneFlag'] == 'SQ'
+            ? _sealedBody(
+                '{"code":"000000","data":{'
+                '"url":"https://cdn.example.com/sq.flac","audioFormatType":"SQ"}}',
+              )
+            : _sealedBody(
+                '{"code":"000000","data":{"cannotCode":"440008",'
+                '"dialogInfo":{"text":"应版权方要求，该高品质音乐开通会员后即可无限畅享"}}}',
+              ),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      var verified = 0;
+      final api = MiguMusicApi(
+        client: MiguApiClient(dio: dio, cookieStore: cookieStore),
+        onAuthVerified: () => verified++,
+      );
+
+      final url = await api.resolvePlaybackUrl(_vipSong, quality: AudioQuality.zq24);
+
+      expect(url, 'https://cdn.example.com/sq.flac');
+      expect(adapter.requests.map((r) => r.uri.queryParameters['toneFlag']), [
+        'ZQ24',
+        'SQ',
+      ]);
+      expect(verified, 1);
+    });
+
+    test('服务端把 ZQ24 静默降为 SQ 时仍采用可用地址', () async {
+      final cookieStore = await createCookieStore();
+      await cookieStore.importLoginCookies('pacmtoken=p1; uid=u1');
+      final adapter = _FakeAdapter(
+        (_) => _sealedBody(
+          '{"code":"000000","data":{'
+          '"url":"https://cdn.example.com/sq.flac","audioFormatType":"SQ"}}',
+        ),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final api = MiguMusicApi(
+        client: MiguApiClient(dio: dio, cookieStore: cookieStore),
+      );
+
+      final url = await api.resolvePlaybackUrl(_vipSong, quality: AudioQuality.zq24);
+
+      expect(url, 'https://cdn.example.com/sq.flac');
+      expect(adapter.requests.single.uri.queryParameters['toneFlag'], 'ZQ24');
+    });
+
+    test('免费曲目选择至臻时走策略接口但不标记账号已验证', () async {
+      final cookieStore = await createCookieStore();
+      await cookieStore.importLoginCookies('pacmtoken=p1; uid=u1');
+      final adapter = _FakeAdapter(
+        (_) => _sealedBody(
+          '{"code":"000000","data":{'
+          '"url":"https://cdn.example.com/free-zq24.flac",'
+          '"audioFormatType":"ZQ24"}}',
+        ),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      var verified = 0;
+      final api = MiguMusicApi(
+        client: MiguApiClient(dio: dio, cookieStore: cookieStore),
+        onAuthVerified: () => verified++,
+      );
+
+      final url = await api.resolvePlaybackUrl(_freeSong, quality: AudioQuality.zq24);
+
+      expect(url, 'https://cdn.example.com/free-zq24.flac');
+      final request = adapter.requests.single;
+      expect(request.uri.path, '/strategy/pc/listen/v2.0');
+      expect(request.uri.queryParameters['toneFlag'], 'ZQ24');
+      expect(verified, 0);
     });
 
     test('VIP 接口不发放地址时转述服务端文案，不标记登录失效', () async {

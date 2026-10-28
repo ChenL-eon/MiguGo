@@ -100,10 +100,12 @@ class _Harness {
     return _Harness._(storage, cookieStore, passport, account, ledger, counters);
   }
 
-  /// 账号接口回绝一次，触发后台续期；续期会停在网络闸门上。
+  /// 用调试入口发起一次换票；它会停在网络闸门上。
+  ///
+  /// 自动路径已经不再发这个请求（票据首次换票即被消耗，见 `markSessionRevoked`），
+  /// 但这些异步窗口对唯一还在用它的入口同样成立。
   void startRenewal() {
-    noteAccountRejection(ledger);
-    account.markSessionRevoked();
+    expect(account.debugRenewNow(), '已发起一次换票');
     expect(passport.renewals, hasLength(1));
   }
 
@@ -356,14 +358,12 @@ void main() {
       expect(h.account.status, AuthStatus.verified);
       expect(h.counters.established, 2);
 
-      // 新账号自己的失效信号必须能发起续期，不能被旧账号那次占用挡住。
-      noteAccountRejection(h.ledger);
-      h.account.markSessionRevoked();
+      // 新账号自己的换票必须能发出去，不能被旧账号那次占用挡住。
+      expect(h.account.debugRenewNow(), '已发起一次换票');
       expect(h.passport.renewals, hasLength(2));
 
-      // 同一会话里仍只允许一次续期在飞。
-      noteAccountRejection(h.ledger);
-      h.account.markSessionRevoked();
+      // 同一会话里仍只允许一次在飞。
+      expect(h.account.debugRenewNow(), '已有一次续期在飞，这次没叠加');
       expect(h.passport.renewals, hasLength(2));
 
       // 旧账号的续期回来，只能结束它自己，不能碰新账号的在飞状态。
@@ -376,8 +376,8 @@ void main() {
       expect(h.account.status, AuthStatus.verified);
       expect(h.counters.established, 2);
 
-      noteAccountRejection(h.ledger);
-      h.account.markSessionRevoked();
+      // 旧那次结束也不替新账号补发：还在飞的就是它自己那一次。
+      expect(h.account.debugRenewNow(), '已有一次续期在飞，这次没叠加');
       expect(h.passport.renewals, hasLength(2));
 
       h.completeRenewal('pacm-renewed-b');

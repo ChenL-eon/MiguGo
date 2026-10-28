@@ -179,12 +179,12 @@ void main() {
         ),
         (
           changed: 0,
-          pacmtoken: 'web-b',
+          pacmtoken: 'pacm-b',
           uid: 'u-b',
           sid: 's-b',
-          webPacmtoken: 'web-b',
+          webPacmtoken: 'pacm-b',
           diskHasB: true,
-          restartedPacmtoken: 'web-b',
+          restartedPacmtoken: 'pacm-b',
           restartedSid: 's-b',
         ),
       );
@@ -212,9 +212,9 @@ void main() {
         ),
         (
           changed: 0,
-          pacmtoken: 'web-b',
+          pacmtoken: 'pacm-b',
           sid: 's-b',
-          webPacmtoken: 'web-b',
+          webPacmtoken: 'pacm-b',
           diskSid: true,
           restartedSid: 's-b',
         ),
@@ -267,7 +267,7 @@ void main() {
           sid: store.loginSnapshot['mg_auth_sid'],
           pacmtoken: store.credentials.pacmtoken,
         ),
-        (withoutToken: 0, withStaleToken: 0, sid: 's-b', pacmtoken: 'web-b'),
+        (withoutToken: 0, withStaleToken: 0, sid: 's-b', pacmtoken: 'pacm-b'),
       );
     });
 
@@ -322,7 +322,7 @@ void main() {
           sid: restarted.loginSnapshot['mg_auth_sid'],
           pacmtoken: restarted.credentials.pacmtoken,
         ),
-        (changed: 0, sid: 's-a', pacmtoken: 'web-a'),
+        (changed: 0, sid: 's-a', pacmtoken: 'pacm-a'),
       );
     });
   });

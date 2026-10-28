@@ -1,8 +1,9 @@
-/// 咪咕网页播放器使用的音质档位；与官方 SDK 一致，只有 PQ / HQ / SQ。
+/// 咪咕网页播放器使用的音质档位：PQ / HQ / SQ，以及按账号权益发放的至臻 ZQ24。
 enum AudioQuality {
   pq('PQ', '标准音质', '标准', '约 128 kbps'),
   hq('HQ', '高品质', '高品质', '约 320 kbps'),
-  sq('SQ', '无损音质', '无损', 'FLAC 无损');
+  sq('SQ', '无损音质', '无损', 'FLAC 无损'),
+  zq24('ZQ24', '至臻音质', '至臻', 'FLAC 24bit');
 
   const AudioQuality(this.toneFlag, this.label, this.shortLabel, this.detail);
 

@@ -137,6 +137,157 @@ void main() {
     });
   });
 
+  group('认证凭据归一化', () {
+    const cases = <String, Map<String, String>>{
+      '主别名冲突': {'pacmtoken': 'chosen', 'mg_auth_pacmtoken': 'other'},
+      '别名在前仍以主名为准': {'mg_auth_pacmtoken': 'other', 'pacmtoken': 'chosen'},
+      '仅有别名补主名': {'mg_auth_pacmtoken': 'chosen'},
+      '仅有主名不增别名': {'pacmtoken': 'chosen'},
+      '空主名使用别名': {'pacmtoken': '', 'mg_auth_pacmtoken': 'chosen'},
+      '空别名跟随主名': {'pacmtoken': 'chosen', 'mg_auth_pacmtoken': ''},
+      '主别名已一致': {'pacmtoken': 'chosen', 'mg_auth_pacmtoken': 'chosen'},
+    };
+
+    void expectConsistent(
+      MiguCookieStore store,
+      Map<String, String> expected,
+    ) {
+      expect(store.loginSnapshot, expected);
+      expect(store.credentials.pacmtoken, 'chosen');
+      expect(store.credentials.uid, 'u1');
+      for (final host in ['music.migu.cn', 'app.c.nf.migu.cn']) {
+        final uri = Uri.https(host, '/');
+        expect(
+          store.cookieHeaderFor(uri)!.split('; '),
+          unorderedEquals(expected.entries.map((e) => '${e.key}=${e.value}')),
+        );
+        expect(store.credentialHeaderMatches(uri), isTrue);
+      }
+    }
+
+    for (final entry in cases.entries) {
+      final cookies = {'uid': 'u1', ...entry.value};
+      final expected = {
+        'uid': 'u1',
+        'pacmtoken': 'chosen',
+        if (cookies.containsKey('mg_auth_pacmtoken')) 'mg_auth_pacmtoken': 'chosen',
+      };
+
+      test('导入：${entry.key}', () async {
+        final storage = FakeSecureCookieStorage();
+        final store = await createStore(storage);
+
+        final count = await store.importLoginCookies(
+          cookies.entries.map((e) => '${e.key}=${e.value}').join('; '),
+        );
+
+        expect(count, expected.length);
+        expectConsistent(store, expected);
+        expect(jsonDecode(storage.values[_manualKey]!), expected);
+        expect(store.credentialStateIsDurable, isTrue);
+        expectConsistent(await createStore(storage), expected);
+      });
+
+      test('原生快照可按条件撤回：${entry.key}', () async {
+        final storage = FakeSecureCookieStorage();
+        final store = await createStore(storage);
+
+        final applied = await store.applyNativeLoginSession(cookies);
+
+        expectConsistent(store, expected);
+        expect(applied.snapshot, store.loginSnapshot);
+        expect(jsonDecode(storage.values[_manualKey]!), applied.snapshot);
+        expect(store.credentialStateIsDurable, isTrue);
+        expect(
+          () => applied.snapshot['pacmtoken'] = 'tampered',
+          throwsUnsupportedError,
+        );
+        expect(
+          await store.clearLoginCookiesIfUnchanged(
+            snapshot: applied.snapshot,
+            revision: applied.revision,
+          ),
+          isTrue,
+        );
+        expect(store.hasImportedLogin, isFalse);
+        expect(storage.values[_manualKey], isNull);
+        expect(applied.snapshot, expected);
+      });
+
+      test('安全存储恢复并重写：${entry.key}', () async {
+        final storage = FakeSecureCookieStorage();
+        storage.values[_manualKey] = jsonEncode(cookies);
+
+        final store = await createStore(storage);
+
+        expectConsistent(store, expected);
+        expect(jsonDecode(storage.values[_manualKey]!), expected);
+        expect(store.credentialStateIsDurable, isTrue);
+        expect(store.credentialSource, 'restored');
+        expect(storage.writeCount, mapEquals(cookies, expected) ? 0 : 1);
+        final writes = storage.writeCount;
+        final restarted = await createStore(storage);
+        expectConsistent(restarted, expected);
+        expect(restarted.credentialStateIsDurable, isTrue);
+        expect(storage.writeCount, writes);
+      });
+    }
+
+    test('恢复归一化写入失败不谎报持久化成功，下次启动重试', () async {
+      final storage = FakeSecureCookieStorage();
+      final raw = jsonEncode({
+        'uid': 'u1',
+        'pacmtoken': 'chosen',
+        'mg_auth_pacmtoken': 'other',
+      });
+      storage.values[_manualKey] = raw;
+      storage.failWriteKeys.add(_manualKey);
+      const expected = {
+        'uid': 'u1',
+        'pacmtoken': 'chosen',
+        'mg_auth_pacmtoken': 'chosen',
+      };
+
+      final store = await createStore(storage);
+
+      expectConsistent(store, expected);
+      expect(store.credentialStateIsDurable, isFalse);
+      expect(store.storageWarning, isNotNull);
+      expect(storage.values[_manualKey], raw);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(_legacyManualKey), isNull);
+
+      storage.failWriteKeys.clear();
+      final restarted = await createStore(storage);
+      expectConsistent(restarted, expected);
+      expect(restarted.credentialStateIsDurable, isTrue);
+      expect(jsonDecode(storage.values[_manualKey]!), expected);
+    });
+
+    test('安全存储不可读时旧明文仅在内存归一化', () async {
+      final raw = jsonEncode({
+        'uid': 'u1',
+        'pacmtoken': 'chosen',
+        'mg_auth_pacmtoken': 'other',
+      });
+      SharedPreferences.setMockInitialValues({_legacyManualKey: raw});
+      final storage = FakeSecureCookieStorage()..failReads = true;
+
+      final store = await createStore(storage);
+
+      expectConsistent(store, const {
+        'uid': 'u1',
+        'pacmtoken': 'chosen',
+        'mg_auth_pacmtoken': 'chosen',
+      });
+      expect(store.credentialStateIsDurable, isFalse);
+      expect(store.storageWarning, isNotNull);
+      expect(storage.writeCount, 0);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(_legacyManualKey), raw);
+    });
+  });
+
   group('网页会话回灌', () {
     test('只更新登录相关名称，忽略统计与设备 Cookie', () async {
       final store = await createStore(FakeSecureCookieStorage());
@@ -424,6 +575,62 @@ void main() {
 
       expect(await store.applyRenewedCredentials({'pacmtoken': 'same'}), 0);
       expect(storage.writeCount, writes);
+    });
+  });
+
+  group('官方轮换与网页别名', () {
+    test('续期只换 pacmtoken 时同步快照里的 mg_auth_pacmtoken', () async {
+      final storage = FakeSecureCookieStorage();
+      final store = await createStore(storage);
+      await store.importLoginCookies(
+        'uid=u1; pacmtoken=old; mg_auth_pacmtoken=web-old',
+      );
+
+      expect(
+        await store.applyRenewedCredentials({'pacmtoken': 'renewed'}),
+        greaterThan(0),
+      );
+
+      expect(store.credentials.pacmtoken, 'renewed');
+      expect(store.loginSnapshot['mg_auth_pacmtoken'], 'renewed');
+      final header = store.cookieHeaderFor(Uri.parse('https://music.migu.cn/'));
+      expect(header, contains('pacmtoken=renewed'));
+      expect(header, contains('mg_auth_pacmtoken=renewed'));
+
+      final restarted = await createStore(storage);
+      expect(restarted.credentials.pacmtoken, 'renewed');
+      expect(restarted.loginSnapshot['mg_auth_pacmtoken'], 'renewed');
+    });
+
+    test('罐子里轮换出的 pacmtoken 优先于快照里迟到的旧别名', () async {
+      final store = await createStore(FakeSecureCookieStorage());
+      await store.importLoginCookies('pacmtoken=old; mg_auth_pacmtoken=web-old');
+      await capture(store, 'https://app.c.nf.migu.cn/api', [
+        'pacmtoken=server; Path=/; Domain=.migu.cn',
+      ]);
+      // 网页回灌可能还带着上一轮快照，不能让它把服务端刚轮换的值挡回去。
+      await store.refreshLoginCookies(const {
+        'mg_auth_pacmtoken': 'stale-alias',
+      }, webSyncToken: store.webSyncToken);
+
+      expect(store.credentials.pacmtoken, 'server');
+    });
+
+    test('Set-Cookie 轮换 pacmtoken 时快照别名跟着更新并落盘', () async {
+      final storage = FakeSecureCookieStorage();
+      final store = await createStore(storage);
+      await store.importLoginCookies('uid=u1; mg_auth_pacmtoken=web-old');
+
+      await capture(store, 'https://app.c.nf.migu.cn/api', [
+        'pacmtoken=server; Path=/; Domain=.migu.cn',
+      ]);
+
+      expect(store.credentials.pacmtoken, 'server');
+      expect(store.loginSnapshot['mg_auth_pacmtoken'], 'server');
+
+      final restarted = await createStore(storage);
+      expect(restarted.credentials.pacmtoken, 'server');
+      expect(restarted.loginSnapshot['mg_auth_pacmtoken'], 'server');
     });
   });
 

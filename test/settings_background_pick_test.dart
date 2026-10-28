@@ -60,7 +60,10 @@ void main() {
       return image.path;
     });
     addTearDown(() {
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      );
       if (!gate.isCompleted) gate.complete();
     });
 
@@ -86,7 +89,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final button = find.widgetWithText(FilledButton, '选择图片');
+    // 设置页先显示分组菜单，播放页背景收在「歌词与播放画面」分组里。
+    await tester.tap(find.text('歌词与播放画面'));
+    await tester.pumpAndSettle();
+
+    final button = find.widgetWithText(TextButton, '选择图片');
     await tester.ensureVisible(button);
     await tester.pumpAndSettle();
 

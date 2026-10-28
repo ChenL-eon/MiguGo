@@ -128,6 +128,27 @@ void main() {
       expect(clearCalls.single.group(1), 'login');
     });
 
+    test('登录页每一处退出都无条件清网页会话，不留可复用登录态', () {
+      final source =
+          File('lib/pages/official_login_page.dart').readAsStringSync();
+      // SSO 实验的「保留 Cookie」开关：通行证会话是会话级 Cookie，应用一退就没了，
+      // 这条路已被证伪，开关本身也不许再出现。
+      expect(source, isNot(contains('keepLoginProfileCookies')));
+      expect(
+        RegExp(
+          r'if\s*\([^)]*\)\s*\{\s*(?:unawaited\()?\s*await\s+'
+          r'AppWebViewEnvironment\.clearLoginCookies',
+        ).hasMatch(source),
+        isFalse,
+      );
+      expect(
+        RegExp(r'AppWebViewEnvironment\.clearLoginCookies\(\)')
+            .allMatches(source)
+            .length,
+        4,
+      );
+    });
+
     test('账号弹窗内嵌原生登录面板，网页只出现在官方登录窗口与播放器', () {
       final center = File('lib/widgets/account_center.dart').readAsStringSync();
       expect(center, contains('NativeLoginPanel'));
@@ -163,7 +184,7 @@ void main() {
   group('隐私政策与实现逐条对应', () {
     test('条目结构完整，标题不重复也不为空', () {
       // 数量是刻意锁定的：删条目等于删披露，必须连同这条一起改。
-      expect(AppConstants.privacyPolicy, hasLength(11));
+      expect(AppConstants.privacyPolicy, hasLength(12));
       final titles = AppConstants.privacyPolicy.map((n) => n.title).toList();
       expect(titles.toSet(), hasLength(titles.length));
       for (final notice in AppConstants.privacyPolicy) {
@@ -179,7 +200,7 @@ void main() {
       expect(text, contains('不含任何账号密钥'));
       expect(text, contains('原生登录保存取链用的 pacmtoken'));
       expect(text, contains('通行证签发的那张登录票据'));
-      expect(text, contains('这条路径没有登录票据，不会主动续期'));
+      expect(text, contains('这条路径没有登录票据'));
       expect(text, contains('Keystore'));
       // Windows 侧是 DPAPI 按当前用户加密的密文，不能写成硬件安全芯片或凭据管理器。
       expect(text, contains('以当前 Windows 账户加密的密文'));
@@ -208,7 +229,10 @@ void main() {
       // 播放器目录里的网页数据不会被清除，这是实现事实，不能含糊承诺。
       expect(text, contains('不会被本应用清除'));
       expect(text, contains('不写日志文件'));
-      expect(text, contains('没有统计、广告、崩溃上报或自动更新组件'));
+      expect(text, contains('没有统计、广告或崩溃上报组件'));
+      // 版本检查是新增的对外请求，政策要同时写出地址和「不带凭据」。
+      expect(text, contains('api.github.com'));
+      expect(text, contains('请求里不带账号、不带凭据'));
       expect(text, contains('Android 清单只声明网络访问一项'));
       expect(text, contains('%APPDATA%'));
     });
@@ -270,17 +294,25 @@ void main() {
       expect(client, contains('/pc/user/home-page/'));
     });
 
-    test('静默续期先于失效判定，政策与实现一致', () {
+    test('票据一次性写进政策：不再承诺静默续期', () {
       final text = _policyText();
-      // 续期只用本机票据换会话，不重登、不提交密码，政策必须把这个顺序写清。
-      expect(text, contains('先用留存的登录票据静默换一次新会话'));
-      expect(text, contains('换到了就继续用，不算一次回绝'));
-      expect(text, contains('c.musicapp.migu.cn 负责登录换票与会话续期'));
+      // 留存票据这件事必须说清它换不来新会话，否则用户会以为掉线能自动恢复。
+      expect(text, contains('它换不来第二份会话'));
+      expect(text, contains('应用不会拿它做自动续期'));
+      expect(text, isNot(contains('先用留存的登录票据静默换一次新会话')));
       expect(text, contains('登录票据与账号快照'));
+      // 这个域名现在只做换票与校验，政策不能再把它写成续期通道。
+      expect(text, contains('c.musicapp.migu.cn 负责登录换票与登录状态校验'));
 
       final provider = File('lib/providers/account_provider.dart').readAsStringSync();
+      // 换票只剩调试入口一个调用方：失效判定这条线路上不能有它。
+      final revoked = provider.substring(
+        provider.indexOf('void markSessionRevoked()'),
+        provider.indexOf('/// 往调试记录里写一条续期事件'),
+      );
+      expect(revoked, isNot(contains('_renewSession')));
       expect(provider, contains('_passport.renewSession'));
-      expect(provider, contains('renewalCooldown'));
+      expect(provider, isNot(contains('renewalCooldown')));
       expect(provider, contains('applyRenewedCredentials'));
       // 票据必须和 Cookie 一样进安全存储，不能落在普通偏好里。
       final ticketStore = File('lib/services/api/passport_ticket_store.dart')
@@ -332,6 +364,38 @@ void main() {
       expect(center, contains('clearQueue()'));
       expect(center, contains('退出登录'));
       expect(center, contains('切换账号'));
+    });
+
+    test('常驻托盘把「后台还在发什么」讲清楚，并且只有 Windows 有这个入口', () {
+      final text = _policyText();
+      expect(text, contains('关闭主窗口后常驻托盘'));
+      expect(text, contains('默认关闭'));
+      expect(text, contains('每 45–75 分钟'));
+      expect(text, contains('不播放音频、不读取你的文件、没有任何统计上报'));
+      // 托盘组件进了依赖，第三方组件那条不能还停在「只有播放、界面与网络库」。
+      expect(text, contains('窗口与托盘组件'));
+      expect(text, isNot(contains('依赖里只有播放、界面与网络库')));
+
+      final settingsPage =
+          File('lib/pages/settings_page.dart').readAsStringSync();
+      expect(settingsPage, contains('关闭主窗口后常驻托盘'));
+      expect(settingsPage, contains('settings.backgroundKeepAliveEnabled'));
+
+      final tray =
+          File('lib/services/platform/desktop_tray.dart').readAsStringSync();
+      expect(tray, contains('Platform.isWindows'));
+      // 安卓没有托盘，后台进程也随时被系统回收，这个能力不许在安卓侧假装存在。
+      expect(tray, contains('Android'));
+      // 后台只是继续同一件探测，不许顺手拉起网页、新的接口或别的域名。
+      expect(tray, isNot(contains('flutter_inappwebview')));
+      expect(tray, isNot(contains('InAppWebView')));
+      expect(tray, isNot(contains('http')));
+      // 政策说「后台期间不播放音频」，收起窗口这一侧就得真的按下暂停。
+      expect(tray, contains('onWindowHidden'));
+
+      // 开关要接通保活本身，否则这项设置只是一句空话。
+      final main = File('lib/main.dart').readAsStringSync();
+      expect(main, contains('keepAlive.allowsBackground = enabled'));
     });
 
     test('隐私政策只留在登录弹窗，关于页不再重复一份', () {

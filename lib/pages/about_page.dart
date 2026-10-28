@@ -1,13 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/constants/app_constants.dart';
 import '../core/theme/android_tokens.dart';
 import '../core/theme/app_colors.dart';
 import '../core/utils/platform_kind.dart';
+import '../providers/update_provider.dart';
 import '../widgets/android/android_feedback.dart';
 import '../widgets/brand_badge.dart';
 import '../widgets/tag_pill.dart';
@@ -100,7 +101,8 @@ class AboutPage extends StatelessWidget {
                     const _NoticeCard(),
                     const SizedBox(height: 14),
                     _UpdateSection(
-                      onCheck: () => _openLink(context, AppConstants.updatePageUrl),
+                      onOpenRelease: () =>
+                          _openLink(context, AppConstants.updatePageUrl),
                     ),
                     const SizedBox(height: 14),
                     _SectionCard(
@@ -192,6 +194,11 @@ class AboutPage extends StatelessWidget {
                           const _InfoRow(
                             label: '外部歌单',
                             value: '仅读取公开链接中的曲目名与歌手，再匹配咪咕曲库',
+                          ),
+                          const SizedBox(height: 8),
+                          const _InfoRow(
+                            label: '版本检查',
+                            value: '匿名读取 GitHub 的公开发布列表比对版本号，不携带账号信息，可关闭',
                           ),
                           const SizedBox(height: 8),
                           const _InfoRow(
@@ -401,41 +408,16 @@ class _GitHubButton extends StatelessWidget {
   }
 }
 
-class _UpdateSection extends StatefulWidget {
-  const _UpdateSection({required this.onCheck});
+class _UpdateSection extends StatelessWidget {
+  const _UpdateSection({required this.onOpenRelease});
 
-  final VoidCallback onCheck;
-
-  @override
-  State<_UpdateSection> createState() => _UpdateSectionState();
-}
-
-class _UpdateSectionState extends State<_UpdateSection> {
-  static const String _autoCheckKey = 'migu_auto_check_updates_v1';
-
-  bool _autoCheck = true;
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_loadAutoCheck());
-  }
-
-  Future<void> _loadAutoCheck() async {
-    final preferences = await SharedPreferences.getInstance();
-    final saved = preferences.getBool(_autoCheckKey);
-    if (!mounted || saved == null || saved == _autoCheck) return;
-    setState(() => _autoCheck = saved);
-  }
-
-  Future<void> _setAutoCheck(bool value) async {
-    setState(() => _autoCheck = value);
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setBool(_autoCheckKey, value);
-  }
+  /// 检查本身留在应用里；只有查到新版本才给一个打开发布页的入口。
+  final VoidCallback onOpenRelease;
 
   @override
   Widget build(BuildContext context) {
+    final update = context.watch<UpdateProvider>();
+    final latest = update.last;
     return _SectionCard(
       icon: Icons.system_update_alt_rounded,
       title: '更新',
@@ -445,17 +427,35 @@ class _UpdateSectionState extends State<_UpdateSection> {
           _UpdateRow(
             icon: Icons.refresh_rounded,
             title: '检查更新',
-            description: '尚未检查更新',
-            trailing: _CheckUpdateButton(onTap: widget.onCheck),
+            description: _describeCheck(update),
+            trailing: _InlineActionButton(
+              icon: Icons.refresh_rounded,
+              label: '立即检查',
+              busy: update.checking,
+              onTap: () => unawaited(update.check()),
+            ),
           ),
+          if (latest?.hasUpdate ?? false) ...[
+            const _PolicyDivider(),
+            _UpdateRow(
+              icon: Icons.download_outlined,
+              title: '新版本 v${latest!.latestVersion}',
+              description: '本机 v${AppConstants.appVersion} 不是最新，打开发布页取安装包。',
+              trailing: _InlineActionButton(
+                icon: Icons.open_in_new_rounded,
+                label: '打开发布页',
+                onTap: onOpenRelease,
+              ),
+            ),
+          ],
           const _PolicyDivider(),
           _UpdateRow(
             icon: Icons.rocket_launch_outlined,
             title: '启动时自动检查',
             description: '启动时自动检查一次是否有新版本。',
             trailing: Switch.adaptive(
-              value: _autoCheck,
-              onChanged: _setAutoCheck,
+              value: update.autoCheck,
+              onChanged: (value) => unawaited(update.setAutoCheck(value)),
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
           ),
@@ -463,6 +463,28 @@ class _UpdateSectionState extends State<_UpdateSection> {
       ),
     );
   }
+}
+
+String _describeCheck(UpdateProvider update) {
+  if (update.checking) return '正在检查…';
+  final failure = update.failure;
+  if (failure != null) return failure;
+  final last = update.last;
+  if (last == null) return '尚未检查更新';
+  final at = update.checkedAt;
+  final suffix = at == null ? '' : '（${_checkedAtLabel(at)}检查）';
+  if (last.hasUpdate) return '发现新版本 v${last.latestVersion}$suffix';
+  return '已是最新版本 v${AppConstants.appVersion}$suffix';
+}
+
+String _checkedAtLabel(DateTime at) {
+  final now = DateTime.now();
+  String two(int value) => value.toString().padLeft(2, '0');
+  final sameDay =
+      at.year == now.year && at.month == now.month && at.day == now.day;
+  return sameDay
+      ? '${two(at.hour)}:${two(at.minute)} '
+      : '${at.year}-${two(at.month)}-${two(at.day)} ';
 }
 
 class _UpdateRow extends StatelessWidget {
@@ -523,26 +545,40 @@ class _UpdateRow extends StatelessWidget {
   }
 }
 
-class _CheckUpdateButton extends StatelessWidget {
-  const _CheckUpdateButton({required this.onTap});
+class _InlineActionButton extends StatelessWidget {
+  const _InlineActionButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.busy = false,
+  });
 
+  final IconData icon;
+  final String label;
   final VoidCallback onTap;
+  final bool busy;
 
   @override
   Widget build(BuildContext context) {
     final accent = context.palette.accent;
     return InkWell(
-      onTap: onTap,
+      onTap: busy ? null : onTap,
       borderRadius: BorderRadius.circular(10),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.refresh_rounded, size: 17, color: accent),
+            SizedBox(
+              width: 17,
+              height: 17,
+              child: busy
+                  ? CircularProgressIndicator(strokeWidth: 2, color: accent)
+                  : Icon(icon, size: 17, color: accent),
+            ),
             const SizedBox(width: 6),
             Text(
-              '立即检查',
+              label,
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
