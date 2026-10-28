@@ -13,6 +13,8 @@ import 'session_probe.dart';
 /// 由账号层做两步判定；本类自身不续期、不自动重登。
 /// 定时器只在有登录凭据时才挂载，退到后台暂停，回到前台恢复原定截止时间；
 /// [allowsBackground] 置真时（桌面端隐藏到托盘）前后台一律继续排期。
+/// 探测本身挂住时按 [probeTimeout] 收口成「未知」，绝不因为一次不返回的探测
+/// 或一个抛错的回调而永久停摆。
 class SessionKeepAlive with WidgetsBindingObserver {
   SessionKeepAlive({
     required this.probe,
@@ -21,6 +23,7 @@ class SessionKeepAlive with WidgetsBindingObserver {
     this.sessionEpoch,
     Duration minInterval = const Duration(minutes: 45),
     Duration maxInterval = const Duration(minutes: 75),
+    this.probeTimeout = const Duration(seconds: 120),
     Random? random,
     DateTime Function()? clock,
   }) : _min = minInterval,
@@ -41,6 +44,11 @@ class SessionKeepAlive with WidgetsBindingObserver {
 
   /// 当前登录凭据的代数；探测返回时若它已经变了，这次结论属于上一个会话。
   final int Function()? sessionEpoch;
+
+  /// 单次探测的等待上限；超时只按「未知」处理，不影响登录状态。
+  ///
+  /// 咪咕接口的读超时是 20 秒，留足重试余地后仍挂住的基本是半开连接。
+  final Duration probeTimeout;
 
   final Duration _min;
   final Duration _max;
@@ -139,7 +147,10 @@ class SessionKeepAlive with WidgetsBindingObserver {
     final epoch = epochOf?.call();
     var result = SessionProbe.unknown;
     try {
-      result = await probe();
+      result = await probe().timeout(probeTimeout);
+    } on TimeoutException {
+      // 探测挂死（连接建了不回、或对端半开）只算「未知」，等下一拍。
+      debugPrint('登录态探测超过 $probeTimeout 未返回，按未知处理');
     } catch (error) {
       debugPrint('登录态探测异常，保持现有状态：$error');
     } finally {
@@ -147,22 +158,28 @@ class SessionKeepAlive with WidgetsBindingObserver {
     }
     if (!_armed) return;
 
-    // 重启调度或换号后，旧探测只能恢复排期，不能再提交结论。
-    if (_scheduleGeneration != generation ||
-        (epochOf != null && epochOf() != epoch)) {
-      _sync();
-      return;
-    }
+    try {
+      // 重启调度或换号后，旧探测只能恢复排期，不能再提交结论。
+      if (_scheduleGeneration != generation ||
+          (epochOf != null && epochOf() != epoch)) {
+        return;
+      }
 
-    switch (result) {
-      case SessionProbe.revoked:
-        stop();
-        onRevoked?.call();
-      case SessionProbe.alive:
-        onAlive?.call();
-        _sync();
-      case SessionProbe.unknown:
-        _sync();
+      switch (result) {
+        case SessionProbe.revoked:
+          stop();
+          onRevoked?.call();
+        case SessionProbe.alive:
+          onAlive?.call();
+        case SessionProbe.unknown:
+          break;
+      }
+    } catch (error) {
+      // 回调抛错也不能把保活打死：这里只记一句，排期照旧。
+      debugPrint('登录态保活处理探测结论时异常，继续排下一次：$error');
+    } finally {
+      // revoked 分支已 stop，此时 _armed 为假，_sync() 只会把排期收干净。
+      _sync();
     }
   }
 }

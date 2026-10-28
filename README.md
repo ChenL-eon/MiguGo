@@ -13,7 +13,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter&logoColor=white" alt="Flutter" />
   <img src="https://img.shields.io/badge/Dart-3.13%2B-0175C2?logo=dart&logoColor=white" alt="Dart" />
-  <img src="https://img.shields.io/badge/Version-1.1.0-4CAF50" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-1.1.1-4CAF50" alt="Version" />
   <img src="https://img.shields.io/badge/Use-Learning%20Only-orange" alt="Learning only" />
 </p>
 
@@ -170,7 +170,7 @@ flutter build apk --release
 
 发布流程会把 Android 包按 ABI 拆分为 `arm64-v8a` 与 `armeabi-v7a` 两个 APK：`flutter build apk --release --target-platform android-arm,android-arm64 --split-per-abi`。
 
-Windows 安装包（可选）由 `windows/installer/MiguGo.iss` 生成，需要 Inno Setup 6：`ISCC.exe /DAppVersion=1.1.0 windows\installer\MiguGo.iss`。
+Windows 安装包（可选）由 `windows/installer/MiguGo.iss` 生成，需要 Inno Setup 6：`ISCC.exe /DAppVersion=1.1.1 windows\installer\MiguGo.iss`。
 
 ### 环境要求
 
@@ -229,7 +229,7 @@ flutter analyze
 flutter test --concurrency=1
 ```
 
-当前共 616 个测试，覆盖登录协议与 RSA、失效判定与自动退出（含哪条回绝才算取证、校验接口专属的失效码、取证不足与凑够两次的分界、换票返回码与回包形态是否如实写进调试记录、只由调试入口发起的换票）、凭据状态源一致性（认证凭证只落在登录快照、罐子里的凭证副本被接回、到期与删除语义都不改写凭据）、跨登录代际的写入隔离与 `checkPacMtoken` 单飞、Cookie 头与裸 `pacmtoken` 头是否带出同一份、调试记录只留指纹不留原文、前台保活的排期与「允许后台」的分界，以及 VIP 取链与音质回退、歌词取址回退、歌单导入匹配、设置持久化与导航分组、常驻托盘开关只在 Windows 出现、桌面歌词、Android 组件与合规文案等。
+当前共 618 个测试，覆盖登录协议与 RSA、失效判定与自动退出（含哪条回绝才算取证、校验接口专属的失效码、取证不足与凑够两次的分界、换票返回码与回包形态是否如实写进调试记录、只由调试入口发起的换票）、凭据状态源一致性（认证凭证只落在登录快照、罐子里的凭证副本被接回、到期与删除语义都不改写凭据）、跨登录代际的写入隔离与 `checkPacMtoken` 单飞、Cookie 头与裸 `pacmtoken` 头是否带出同一份、调试记录只留指纹不留原文、前台保活的排期与「允许后台」的分界（含探测挂死与回调抛错都不许把保活打死），以及 VIP 取链与音质回退、歌词取址回退、歌单导入匹配、设置持久化与导航分组、常驻托盘开关只在 Windows 出现、桌面歌词、Android 组件与合规文案等。
 
 ---
 

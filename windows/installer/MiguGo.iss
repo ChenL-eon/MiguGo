@@ -1,5 +1,5 @@
 ﻿; MiguGo Windows installer (Inno Setup 6)
-; Build: ISCC.exe /DAppVersion=1.1.0 windows\installer\MiguGo.iss
+; Build: ISCC.exe /DAppVersion=1.1.1 windows\installer\MiguGo.iss
 ; ChineseSimplified.isl is the official translation from
 ; https://github.com/jrsoftware/issrc/tree/main/Files/Languages
 

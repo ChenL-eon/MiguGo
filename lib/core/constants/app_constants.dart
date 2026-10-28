@@ -7,7 +7,7 @@ class AppConstants {
   const AppConstants._();
 
   static const String appName = 'MiguGo';
-  static const String appVersion = '1.1.0';
+  static const String appVersion = '1.1.1';
 
   /// 关于页的代码仓库与更新入口；更新按钮落在发行版列表，而不是仓库首页。
   static const String githubRepoUrl = 'https://github.com/ChenL-eon/MiguGo';

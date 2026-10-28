@@ -258,6 +258,8 @@ void main() {
         onRevoked: () => callbacks++,
         minInterval: const Duration(hours: 1),
         maxInterval: const Duration(hours: 1),
+        // 这两条测的是「探测还在途」的语义，把上限推到测试时间轴之外。
+        probeTimeout: const Duration(days: 1),
         clock: tester.binding.clock.now,
       )..restart();
       addTearDown(keepAlive.dispose);
@@ -290,6 +292,7 @@ void main() {
       onRevoked: () => revoked++,
       minInterval: const Duration(hours: 1),
       maxInterval: const Duration(hours: 1),
+      probeTimeout: const Duration(days: 1),
       clock: tester.binding.clock.now,
     )..restart();
     addTearDown(keepAlive.dispose);
@@ -307,6 +310,61 @@ void main() {
     expect(revoked, 0);
     expect(calls, 2);
     expect(keepAlive.isArmed, isTrue);
+    keepAlive.dispose();
+  });
+
+  testWidgets('探测挂死到上限时按未知收口，下一拍照常排', (tester) async {
+    var calls = 0;
+    var alive = 0;
+    final keepAlive = SessionKeepAlive(
+      probe: () {
+        calls++;
+        return Completer<SessionProbe>().future;
+      },
+      onAlive: () => alive++,
+      minInterval: const Duration(hours: 1),
+      maxInterval: const Duration(hours: 1),
+      probeTimeout: const Duration(minutes: 2),
+      clock: tester.binding.clock.now,
+    )..restart();
+    addTearDown(keepAlive.dispose);
+
+    await tester.pump(const Duration(hours: 1));
+    expect(calls, 1);
+    // 还没到上限：探测在途，既不判活也不判死。
+    await tester.pump(const Duration(minutes: 1));
+    expect(alive, 0);
+    await tester.pump(const Duration(minutes: 1));
+    expect(keepAlive.isArmed, isTrue);
+    // 上限到点后被当成「未知」收口，重新等完整间隔。
+    await tester.pump(const Duration(hours: 1));
+    expect(calls, 2);
+    expect(alive, 0);
+    // 让第二次挂死的探测也烧完上限，不给测试结尾留待触发的计时器。
+    await tester.pump(const Duration(minutes: 2));
+    keepAlive.dispose();
+  });
+
+  testWidgets('上层回调抛异常不打死保活，下一拍照常排', (tester) async {
+    var calls = 0;
+    final keepAlive = SessionKeepAlive(
+      probe: () async {
+        calls++;
+        return SessionProbe.alive;
+      },
+      onAlive: () => throw StateError('刷新校验时间时炸了'),
+      minInterval: const Duration(hours: 1),
+      maxInterval: const Duration(hours: 1),
+      clock: tester.binding.clock.now,
+    )..restart();
+    addTearDown(keepAlive.dispose);
+
+    await tester.pump(const Duration(hours: 1));
+    expect(calls, 1);
+    expect(keepAlive.isArmed, isTrue);
+    await tester.pump(const Duration(hours: 1));
+    expect(calls, 2);
+    expect(tester.takeException(), isNull);
     keepAlive.dispose();
   });
 
